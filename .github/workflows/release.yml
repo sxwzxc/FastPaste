@@ -1,17 +1,10 @@
 name: Release
 
-# 一键打包 + 提交推送 + 发布 Release
+# 一键打包 (Windows + macOS) + 自动发布到 GitHub Release
 # 对应本地 release.ps1 / release.bat 的 CI 版本
-# 触发方式:
-#   1) 手动触发 workflow_dispatch 输入新版本号 x.y.z (推荐)
-#      -> 自动 bump Cargo.toml / app.manifest
-#      -> cargo test -> cargo build --release
-#      -> 更新 README.md release-info + CHANGELOG.md
-#      -> 生成 dist/fastpaste.exe + .sha256 + .zip
-#      -> git commit + git tag v* + git push
-#      -> 创建 GitHub Release 并上传产物
-#   2) 推送 tag v*.*.* 时触发 (如 git tag v0.2.5 && git push --tags)
-#      -> 直接构建当前 tag 的代码并发布 Release (不改版本文件)
+# 触发:
+#  1) 手动 workflow_dispatch 输入版本号 x.y.z (推荐) -> bump -> 构建双平台 -> 提交推送 -> 发布 Release
+#  2) 推送 tag v*.*.* -> 直接构建双平台 -> 发布 Release (不改版本文件)
 on:
   workflow_dispatch:
     inputs:
@@ -37,14 +30,69 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  release:
-    runs-on: windows-latest
+  # ------------------------------------------------------------
+  # 1) 确定版本号 (单点输出，供后续 jobs 复用)
+  # ------------------------------------------------------------
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      target_version: ${{ steps.version.outputs.target_version }}
+      current_version: ${{ steps.version.outputs.current_version }}
+      is_bump: ${{ steps.version.outputs.is_bump }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
-          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Determine version
+        id: version
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          function Get-CurrentVersion {
+            $toml = Get-Content -LiteralPath "Cargo.toml" -Raw -Encoding UTF8
+            if ($toml -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "无法从 Cargo.toml 解析 version" }
+            return $Matches[1].Trim()
+          }
+          $CurrentVersion = Get-CurrentVersion
+          Write-Host "CurrentVersion = $CurrentVersion"
+          $TargetVersion = ""
+          $EventName = "${{ github.event_name }}"
+          $RefName = "${{ github.ref_name }}"
+          $RefType = "${{ github.ref_type }}"
+          $InputVersion = "${{ inputs.version }}".Trim()
+          if ($EventName -eq "workflow_dispatch") {
+            if ([string]::IsNullOrWhiteSpace($InputVersion)) {
+              $TargetVersion = $CurrentVersion
+              Write-Host "workflow_dispatch 未输入版本，保持 $TargetVersion"
+            } else { $TargetVersion = $InputVersion }
+          } elseif ($RefType -eq "tag") {
+            $TargetVersion = $RefName.TrimStart("v").Trim()
+            Write-Host "tag 触发: $RefName -> $TargetVersion"
+          } else { $TargetVersion = $CurrentVersion }
+          if ($TargetVersion -notmatch '^\d+\.\d+\.\d+$') { throw "版本号格式非法: '$TargetVersion'" }
+          $IsBump = ($TargetVersion -ne $CurrentVersion)
+          Write-Host "TargetVersion=$TargetVersion IsBump=$IsBump"
+          "current_version=$CurrentVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "target_version=$TargetVersion"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          "is_bump=$IsBump"                 | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+
+  # ------------------------------------------------------------
+  # 2) 双平台编译 (Windows + macOS)
+  # ------------------------------------------------------------
+  build:
+    needs: prepare
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Setup Rust
         uses: dtolnay/rust-toolchain@stable
@@ -52,83 +100,22 @@ jobs:
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
 
-      # ------------------------------------------------------------
-      # 确定目标版本
-      # ------------------------------------------------------------
-      - name: Determine version
-        id: version
+      - name: Bump version for build (ensure binary embeds correct version)
+        if: needs.prepare.outputs.is_bump == 'True'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-
-          function Get-CurrentVersion {
-            $toml = Get-Content -LiteralPath "Cargo.toml" -Raw -Encoding UTF8
-            if ($toml -notmatch '(?m)^version\s*=\s*"([^"]+)"') { throw "无法从 Cargo.toml 解析 version" }
-            return $Matches[1].Trim()
-          }
-
-          $CurrentVersion = Get-CurrentVersion
-          Write-Host "CurrentVersion = $CurrentVersion"
-
-          $TargetVersion = ""
-          $EventName = "${{ github.event_name }}"
-          $RefName = "${{ github.ref_name }}"
-          $RefType = "${{ github.ref_type }}"
-          $InputVersion = "${{ inputs.version }}".Trim()
-
-          if ($EventName -eq "workflow_dispatch") {
-            if ([string]::IsNullOrWhiteSpace($InputVersion)) {
-              $TargetVersion = $CurrentVersion
-              Write-Host "workflow_dispatch 未输入版本，保持当前版本 $TargetVersion"
-            } else {
-              $TargetVersion = $InputVersion
-            }
-          } elseif ($RefType -eq "tag") {
-            $TargetVersion = $RefName.TrimStart("v").Trim()
-            Write-Host "tag 触发，解析 TargetVersion = $TargetVersion (from $RefName)"
-          } else {
-            $TargetVersion = $CurrentVersion
-          }
-
-          if ($TargetVersion -notmatch '^\d+\.\d+\.\d+$') {
-            throw "版本号格式非法: '$TargetVersion'，应为 x.y.z (如 0.2.5)"
-          }
-
-          $IsBump = ($TargetVersion -ne $CurrentVersion)
-          Write-Host "TargetVersion = $TargetVersion, IsBump = $IsBump"
-
-          "current_version=$CurrentVersion" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "target_version=$TargetVersion"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-          "is_bump=$IsBump"                 | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
-
-          # 供后续 step 直接读取
-          "TARGET_VERSION=$TargetVersion"  | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-          "CURRENT_VERSION=$CurrentVersion"| Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
-
-      # ------------------------------------------------------------
-      # 版本 bump: 仅 workflow_dispatch 且版本变化时修改源文件
-      # 对应 release.ps1 的 Cargo.toml + app.manifest 逻辑
-      # ------------------------------------------------------------
-      - name: Bump version files
-        if: github.event_name == 'workflow_dispatch' && steps.version.outputs.is_bump == 'True'
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $TargetVersion = "${{ steps.version.outputs.target_version }}"
-          Write-Host "==> Bump $env:CURRENT_VERSION -> $TargetVersion"
-
-          # Cargo.toml：仅替换 [package] 下第一个 version
+          $TargetVersion = "${{ needs.prepare.outputs.target_version }}"
+          Write-Host "Bump (build) -> $TargetVersion"
           $lines = Get-Content -LiteralPath "Cargo.toml" -Encoding UTF8
-          $inPackage = $false
-          $replaced = $false
-          for ($i = 0; $i -lt $lines.Count; $i++) {
+          $inPackage = $false; $replaced = $false
+          for ($i=0; $i -lt $lines.Count; $i++) {
             $trim = $lines[$i].Trim()
             if ($trim -match '^\[package\]') { $inPackage = $true; continue }
             if ($inPackage -and $trim -match '^\[') { $inPackage = $false }
             if ($inPackage -and -not $replaced -and $lines[$i] -match '^\s*version\s*=\s*".*?"') {
               $lines[$i] = $lines[$i] -replace 'version\s*=\s*".*?"', "version = `"$TargetVersion`""
-              $replaced = $true
-              break
+              $replaced = $true; break
             }
           }
           if (-not $replaced) {
@@ -138,55 +125,129 @@ jobs:
           } else {
             [System.IO.File]::WriteAllText((Join-Path $PWD "Cargo.toml"), ($lines -join "`r`n"), (New-Object System.Text.UTF8Encoding $false))
           }
-          Write-Host "[OK] Cargo.toml -> $TargetVersion"
-
-          # app.manifest：assemblyIdentity version="x.y.z.0"
           $manifestPath = "app.manifest"
-          $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
-          $manifestVer4 = "$TargetVersion.0"
-          if ($manifest -match 'assemblyIdentity[^>]*version="[^"]+"') {
-            $manifest = $manifest -replace '(assemblyIdentity[^>]*version=")[^"]+(")', "`${1}$manifestVer4`$2"
-            [System.IO.File]::WriteAllText((Join-Path $PWD $manifestPath), $manifest, (New-Object System.Text.UTF8Encoding $false))
-            Write-Host "[OK] app.manifest -> $manifestVer4"
-          } else {
-            Write-Host "[WARN] app.manifest 未找到 version 属性"
+          if (Test-Path -LiteralPath $manifestPath) {
+            $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
+            $manifestVer4 = "$TargetVersion.0"
+            if ($manifest -match 'assemblyIdentity[^>]*version="[^"]+"') {
+              $manifest = $manifest -replace '(assemblyIdentity[^>]*version=")[^"]+(")', "`${1}$manifestVer4`$2"
+              [System.IO.File]::WriteAllText((Join-Path $PWD $manifestPath), $manifest, (New-Object System.Text.UTF8Encoding $false))
+            }
           }
-
-          Get-Content -LiteralPath "Cargo.toml" -Encoding UTF8 | Select-String "version" | Select-Object -First 3
+          Write-Host "[OK] bumped to $TargetVersion"
 
       - name: cargo test
         if: ${{ !inputs.skip_test }}
-        shell: pwsh
         run: cargo test --verbose
 
       - name: cargo build --release
-        shell: pwsh
-        run: |
-          Write-Host "==> cargo build --release (lto=true 首次较慢) ..." -ForegroundColor Cyan
-          cargo build --release --verbose
-          $exe = "target\release\fastpaste.exe"
-          if (-not (Test-Path -LiteralPath $exe)) { $exe = "target\release\fastpaste" }
-          if (-not (Test-Path -LiteralPath $exe)) { throw "未找到产物 $exe" }
-          $sizeMB = "{0:N2}" -f ((Get-Item -LiteralPath $exe).Length / 1MB)
-          Write-Host "[OK] $exe ($sizeMB MB)" -ForegroundColor Green
+        run: cargo build --release --verbose
 
-      # ------------------------------------------------------------
-      # 更新 README.md release-info + CHANGELOG.md
-      # 对应 release.ps1 的文档更新逻辑
-      # ------------------------------------------------------------
-      - name: Update README and CHANGELOG
+      - name: Generate dist artifacts
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $TargetVersion = "${{ steps.version.outputs.target_version }}"
+          $TargetVersion = "${{ needs.prepare.outputs.target_version }}"
+          $isWin = $env:RUNNER_OS -eq "Windows"
+          $exeName = if ($isWin) { "fastpaste.exe" } else { "fastpaste" }
+          $srcExe = "target/release/$exeName"
+          if (-not (Test-Path -LiteralPath $srcExe)) {
+            # fallback: try opposite name
+            $alt = if ($isWin) { "target/release/fastpaste" } else { "target/release/fastpaste.exe" }
+            if (Test-Path -LiteralPath $alt) { $srcExe = $alt; $exeName = Split-Path $alt -Leaf }
+          }
+          if (-not (Test-Path -LiteralPath $srcExe)) { throw "未找到产物 $srcExe" }
+          $distDir = "dist"
+          if (-not (Test-Path -LiteralPath $distDir)) { New-Item -ItemType Directory -Path $distDir | Out-Null }
+          $dstExe = Join-Path $distDir $exeName
+          Copy-Item -LiteralPath $srcExe -Destination $dstExe -Force
+          $sizeMB = "{0:N2}" -f ((Get-Item -LiteralPath $dstExe).Length / 1MB)
+          Write-Host "[OK] $srcExe -> $dstExe ($sizeMB MB)"
+          $hash = (Get-FileHash -LiteralPath $dstExe -Algorithm SHA256).Hash.ToLower()
+          $shaFile = "$dstExe.sha256"
+          [System.IO.File]::WriteAllText($shaFile, "$hash  $exeName", (New-Object System.Text.UTF8Encoding $false))
+          Write-Host "[OK] sha256: $hash  $exeName"
+          # 平台后缀
+          $platform = if ($isWin) { "windows-x64" } else { "macos-arm64" }
+          if ($env:RUNNER_OS -eq "macOS" -and $env:RUNNER_ARCH -eq "X64") { $platform = "macos-x64" }
+          # macos-latest 当前为 arm64, 标记为 macos-arm64；如需 x64 可额外加 macos-13 任务
+          $zipName = "fastpaste-v$TargetVersion-$platform.zip"
+          $zipPath = Join-Path $distDir $zipName
+          if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
+          Compress-Archive -LiteralPath $dstExe, $shaFile -DestinationPath $zipPath -Force
+          Write-Host "[OK] zip: $zipPath"
+          Get-ChildItem -LiteralPath $distDir | Format-Table Name, Length, LastWriteTime -AutoSize | Out-String | Write-Host
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fastpaste-${{ matrix.os }}-${{ needs.prepare.outputs.target_version }}
+          path: |
+            dist/fastpaste*
+            dist/*.zip
+            dist/*.sha256
+          if-no-files-found: error
+          retention-days: 30
+
+  # ------------------------------------------------------------
+  # 3) 提交推送 + 发布 Release (自动)
+  # ------------------------------------------------------------
+  publish:
+    needs: [prepare, build]
+    runs-on: ubuntu-latest
+    if: always() && needs.build.result == 'success'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Bump + Update docs (for commit)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $TargetVersion = "${{ needs.prepare.outputs.target_version }}"
+          $CurrentVersion = "${{ needs.prepare.outputs.current_version }}"
+          $IsBump = "${{ needs.prepare.outputs.is_bump }}"
+          Write-Host "Target=$TargetVersion Current=$CurrentVersion IsBump=$IsBump"
+
+          # 1) Bump Cargo.toml / app.manifest (幂等)
+          if ($IsBump -eq "True") {
+            $lines = Get-Content -LiteralPath "Cargo.toml" -Encoding UTF8
+            $inPackage = $false; $replaced = $false
+            for ($i=0; $i -lt $lines.Count; $i++) {
+              $trim = $lines[$i].Trim()
+              if ($trim -match '^\[package\]') { $inPackage = $true; continue }
+              if ($inPackage -and $trim -match '^\[') { $inPackage = $false }
+              if ($inPackage -and -not $replaced -and $lines[$i] -match '^\s*version\s*=\s*".*?"') {
+                $lines[$i] = $lines[$i] -replace 'version\s*=\s*".*?"', "version = `"$TargetVersion`""
+                $replaced = $true; break
+              }
+            }
+            if (-not $replaced) {
+              $raw = Get-Content -LiteralPath "Cargo.toml" -Raw -Encoding UTF8
+              $raw = $raw -replace 'version\s*=\s*".*?"', "version = `"$TargetVersion`"", 1
+              [System.IO.File]::WriteAllText((Join-Path $PWD "Cargo.toml"), $raw, (New-Object System.Text.UTF8Encoding $false))
+            } else {
+              [System.IO.File]::WriteAllText((Join-Path $PWD "Cargo.toml"), ($lines -join "`r`n"), (New-Object System.Text.UTF8Encoding $false))
+            }
+            $manifestPath = "app.manifest"
+            if (Test-Path -LiteralPath $manifestPath) {
+              $manifest = Get-Content -LiteralPath $manifestPath -Raw -Encoding UTF8
+              $manifestVer4 = "$TargetVersion.0"
+              if ($manifest -match 'assemblyIdentity[^>]*version="[^"]+"') {
+                $manifest = $manifest -replace '(assemblyIdentity[^>]*version=")[^"]+(")', "`${1}$manifestVer4`$2"
+                [System.IO.File]::WriteAllText((Join-Path $PWD $manifestPath), $manifest, (New-Object System.Text.UTF8Encoding $false))
+              }
+            }
+            Write-Host "[OK] bumped"
+          }
+
+          # 2) README release-info
           $buildTime = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
           $commitHash = "unknown"
-          try {
-            $commitHash = (git rev-parse --short HEAD 2>$null).Trim()
-            if (-not $commitHash) { $commitHash = "unknown" }
-          } catch { $commitHash = "unknown" }
-
-          # README.md release-info 块
+          try { $commitHash = (git rev-parse --short HEAD 2>$null).Trim(); if (-not $commitHash) { $commitHash="unknown" } } catch {}
           $readmePath = "README.md"
           if (Test-Path -LiteralPath $readmePath) {
             $readme = Get-Content -LiteralPath $readmePath -Raw -Encoding UTF8
@@ -194,167 +255,84 @@ jobs:
             if ($readme -match '<!-- release-info:start -->[\s\S]*?<!-- release-info:end -->') {
               $readme = $readme -replace '<!-- release-info:start -->[\s\S]*?<!-- release-info:end -->', $newInfo
               [System.IO.File]::WriteAllText((Join-Path $PWD $readmePath), $readme, (New-Object System.Text.UTF8Encoding $false))
-              Write-Host "[OK] README.md -> v$TargetVersion $buildTime $commitHash"
-            } else {
-              Write-Host "[WARN] README.md 未找到 release-info 标记，跳过"
+              Write-Host "[OK] README updated"
             }
           }
-
-          # CHANGELOG.md
+          # 3) CHANGELOG
           $changelogPath = "CHANGELOG.md"
           if (Test-Path -LiteralPath $changelogPath) {
             $changelog = Get-Content -LiteralPath $changelogPath -Raw -Encoding UTF8
             $today = Get-Date -Format "yyyy-MM-dd"
-            $isBump = "${{ steps.version.outputs.is_bump }}"
             if ($changelog -match "## \[$([regex]::Escape($TargetVersion))\]") {
               $escaped = [regex]::Escape($TargetVersion)
               $changelog = $changelog -replace "## \[$escaped\] - \d{4}-\d{2}-\d{2}", "## [$TargetVersion] - $today"
               [System.IO.File]::WriteAllText((Join-Path $PWD $changelogPath), $changelog, (New-Object System.Text.UTF8Encoding $false))
-              Write-Host "[OK] CHANGELOG.md 日期更新 -> $today"
-            } elseif ($isBump -eq "True") {
+              Write-Host "[OK] CHANGELOG date -> $today"
+            } elseif ($IsBump -eq "True") {
               $newEntry = "## [$TargetVersion] - $today`r`n`r`n### Changed`r`n- ...`r`n`r`n"
               if ($changelog -match '(?m)^## \[\d+\.\d+\.\d+\]') {
                 $changelog = $changelog -replace '(?m)^(## \[\d+\.\d+\.\d+\])', "$newEntry`$1"
-              } else {
-                $changelog = $changelog.TrimEnd() + "`r`n`r`n" + $newEntry
-              }
+              } else { $changelog = $changelog.TrimEnd() + "`r`n`r`n" + $newEntry }
               [System.IO.File]::WriteAllText((Join-Path $PWD $changelogPath), $changelog, (New-Object System.Text.UTF8Encoding $false))
-              Write-Host "[OK] CHANGELOG.md 新增条目 [$TargetVersion]"
-            } else {
-              Write-Host "CHANGELOG.md 保持不变（未 bump）"
+              Write-Host "[OK] CHANGELOG new entry"
             }
           }
 
-      # ------------------------------------------------------------
-      # 生成 dist 产物 + sha256 + zip
-      # 对应 release.ps1 的 dist 逻辑，产物不依赖 git 提交即可发布
-      # ------------------------------------------------------------
-      - name: Generate dist artifacts
-        shell: pwsh
-        run: |
-          $ErrorActionPreference = "Stop"
-          $exeName = "fastpaste.exe"
-          $srcExe = "target\release\$exeName"
-          if (-not (Test-Path -LiteralPath $srcExe)) {
-            $alt = "target\release\fastpaste"
-            if (Test-Path -LiteralPath $alt) { $srcExe = $alt; $exeName = "fastpaste" }
-          }
-          if (-not (Test-Path -LiteralPath $srcExe)) { throw "未找到编译产物 $srcExe" }
-
-          $distDir = "dist"
-          if (-not (Test-Path -LiteralPath $distDir)) { New-Item -ItemType Directory -Path $distDir | Out-Null }
-
-          $dstExe = Join-Path $distDir $exeName
-          Copy-Item -LiteralPath $srcExe -Destination $dstExe -Force
-          $sizeMB = "{0:N2}" -f ((Get-Item -LiteralPath $dstExe).Length / 1MB)
-          Write-Host "[OK] 已复制 $srcExe -> $dstExe ($sizeMB MB)"
-
-          # sha256 (类似 sha256sum 格式)
-          $hash = (Get-FileHash -LiteralPath $dstExe -Algorithm SHA256).Hash.ToLower()
-          $shaFile = "$dstExe.sha256"
-          [System.IO.File]::WriteAllText($shaFile, "$hash  $exeName", (New-Object System.Text.UTF8Encoding $false))
-          Write-Host "[OK] $shaFile : $hash  $exeName"
-
-          # zip 额外打包，便于 Release 下载
-          $TargetVersion = "${{ steps.version.outputs.target_version }}"
-          $zipName = "fastpaste-v$TargetVersion-windows-x64.zip"
-          $zipPath = Join-Path $distDir $zipName
-          if (Test-Path -LiteralPath $zipPath) { Remove-Item -LiteralPath $zipPath -Force }
-          Compress-Archive -LiteralPath $dstExe, $shaFile -DestinationPath $zipPath -Force
-          # 也把 README/CHANGELOG 打进去可选
-          Write-Host "[OK] 已生成 $zipPath"
-          Get-ChildItem -LiteralPath $distDir | Format-Table Name, Length, LastWriteTime -AutoSize | Out-String | Write-Host
-
-      # ------------------------------------------------------------
-      # 提交与推送：仅 workflow_dispatch 时将版本/文档变更推回仓库并打 tag
-      # 需要 permissions: contents: write
-      # ------------------------------------------------------------
-      - name: Commit and push (version bump)
+      - name: Commit and push (only on workflow_dispatch)
         if: github.event_name == 'workflow_dispatch'
         shell: pwsh
         run: |
           $ErrorActionPreference = "Stop"
-          $TargetVersion = "${{ steps.version.outputs.target_version }}"
-          $IsBump = "${{ steps.version.outputs.is_bump }}"
-
+          $TargetVersion = "${{ needs.prepare.outputs.target_version }}"
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
           git status --porcelain
-
-          # 仅提交版本与文档文件；dist 默认被 .gitignore 忽略，如需提交 dist 请改用 git add -f dist/
           $toAdd = @("Cargo.toml","app.manifest","README.md","CHANGELOG.md")
           $existing = $toAdd | Where-Object { Test-Path -LiteralPath $_ }
-          if ($existing.Count -eq 0) { Write-Host "无文件可提交"; exit 0 }
-
           git add -- $existing
-          # 如果 dist 需要一并提交到仓库，取消下一行注释 (强制添加被忽略的 dist)
-          # git add -f dist/fastpaste.exe dist/fastpaste.exe.sha256 dist/*.zip 2>$null; Write-Host "已强制添加 dist"
-
-          $hasStaged = $true
           git diff --staged --quiet
-          if ($LASTEXITCODE -eq 0) {
-            Write-Host "无暂存变更，跳过提交"
-            $hasStaged = $false
-          }
-
+          $hasStaged = ($LASTEXITCODE -ne 0)
           if ($hasStaged) {
             git commit -m "chore(release): v$TargetVersion [skip ci]"
-            Write-Host "[OK] 已提交 chore(release): v$TargetVersion"
-          } else {
-            Write-Host "[SKIP] 无变更不提交，但仍会检查 tag"
-          }
-
-          # 推送分支：workflow_dispatch 所在分支 (通常为 main)
+            Write-Host "[OK] committed"
+          } else { Write-Host "[SKIP] no staged changes" }
           $branch = "${{ github.ref_name }}"
           if (-not $branch) { $branch = "main" }
-          Write-Host "推送分支 $branch ..."
+          Write-Host "push to $branch"
           git push origin HEAD:$branch
-
-          # 创建并推送 tag (若已存在则跳过)
           $tag = "v$TargetVersion"
-          $tagExists = $false
-          try { git rev-parse --verify "refs/tags/$tag" 2>$null | Out-Null; if ($LASTEXITCODE -eq 0) { $tagExists = $true } } catch {}
-          # 远程是否已存在
           $remoteTag = git ls-remote --tags origin "refs/tags/$tag"
-          if ($remoteTag) { $tagExists = $true; Write-Host "远端 tag $tag 已存在，跳过创建" }
-
-          if (-not $tagExists) {
+          if (-not $remoteTag) {
             git tag $tag
             git push origin $tag
-            Write-Host "[OK] 已推送 tag $tag"
-          } else {
-            Write-Host "[SKIP] tag $tag 已存在"
-          }
+            Write-Host "[OK] pushed tag $tag"
+          } else { Write-Host "[SKIP] remote tag $tag exists" }
 
-      # ------------------------------------------------------------
-      # 上传 artifact 供 Actions 页面下载 (调试用)
-      # ------------------------------------------------------------
-      - name: Upload dist artifact
-        uses: actions/upload-artifact@v4
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
         with:
-          name: fastpaste-dist-${{ steps.version.outputs.target_version }}
-          path: |
-            dist/fastpaste.exe
-            dist/fastpaste.exe.sha256
-            dist/*.zip
-          if-no-files-found: error
-          retention-days: 30
+          path: dist-all
+          merge-multiple: true
 
-      # ------------------------------------------------------------
-      # 创建 GitHub Release 并上传产物
-      # 依赖 softprops/action-gh-release，自动以 tag 为 Release
-      # ------------------------------------------------------------
-      - name: Create GitHub Release
+      - name: List artifacts
+        shell: bash
+        run: |
+          ls -lhR dist-all || true
+          mkdir -p dist
+          cp -r dist-all/* dist/ 2>/dev/null || true
+          ls -lh dist/
+
+      - name: Create GitHub Release (auto)
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: v${{ steps.version.outputs.target_version }}
-          name: FastPaste v${{ steps.version.outputs.target_version }}
+          tag_name: v${{ needs.prepare.outputs.target_version }}
+          name: FastPaste v${{ needs.prepare.outputs.target_version }}
           body_path: CHANGELOG.md
-          # 若 tag 已存在则更新 Release；若为 workflow_dispatch 新建 tag 则创建
           generate_release_notes: true
           files: |
-            dist/fastpaste.exe
-            dist/fastpaste.exe.sha256
+            dist/fastpaste*
             dist/*.zip
+            dist/*.sha256
+            dist-all/**
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

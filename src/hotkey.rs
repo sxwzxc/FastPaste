@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use global_hotkey::{
     hotkey::HotKey,
-    GlobalHotKeyEvent, GlobalHotKeyManager,
+    GlobalHotKeyEvent, GlobalHotKeyManager, HotKeyState,
 };
 use std::collections::HashMap;
 
@@ -87,12 +87,19 @@ impl HotkeyManager {
 
     /// 将 GlobalHotKeyEvent 映射为 digit
     pub fn event_to_digit(&self, event: &GlobalHotKeyEvent) -> Option<u8> {
-        self.id_to_digit.get(&event.id).copied()
+        digit_from_event(&self.id_to_digit, event)
     }
 
     pub fn hotkey_count(&self) -> usize {
         self.hotkeys.len()
     }
+}
+
+pub fn digit_from_event(id_to_digit: &HashMap<u32, u8>, event: &GlobalHotKeyEvent) -> Option<u8> {
+    if event.state != HotKeyState::Pressed {
+        return None;
+    }
+    id_to_digit.get(&event.id).copied()
 }
 
 /// 解析 digit 的辅助，与 History::get_by_hotkey_digit 保持一致
@@ -107,6 +114,7 @@ pub fn digit_to_history_index(digit: u8) -> Option<usize> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::HashMap;
 
     #[test]
     fn digit_to_index() {
@@ -122,5 +130,22 @@ mod tests {
         for hk in &cfg.hotkeys {
             assert!(crate::config::to_global_hotkey(hk).is_ok(), "{}", hk);
         }
+    }
+
+    #[test]
+    fn released_event_is_ignored() {
+        let mut map = HashMap::new();
+        map.insert(42, 1u8);
+        let pressed = GlobalHotKeyEvent { id: 42, state: HotKeyState::Pressed };
+        let released = GlobalHotKeyEvent { id: 42, state: HotKeyState::Released };
+        assert_eq!(digit_from_event(&map, &pressed), Some(1));
+        assert_eq!(digit_from_event(&map, &released), None);
+    }
+
+    #[test]
+    fn unknown_id_none() {
+        let map = HashMap::new();
+        let pressed = GlobalHotKeyEvent { id: 1, state: HotKeyState::Pressed };
+        assert_eq!(digit_from_event(&map, &pressed), None);
     }
 }

@@ -1,7 +1,12 @@
 use anyhow::Result;
 use std::borrow::Cow;
+use std::sync::atomic::{AtomicU8, Ordering};
 use std::sync::Arc;
 use parking_lot::Mutex;
+
+pub const INGEST_LIVE: u8 = 0;
+pub const INGEST_PAUSED: u8 = 1;
+pub const INGEST_CATCHUP: u8 = 2;
 
 use crate::history::History;
 
@@ -272,17 +277,27 @@ pub struct ClipboardManager<C: Clipboard> {
     watcher: PollingWatcher<C>,
     history: Arc<Mutex<History>>,
     enabled: Arc<Mutex<bool>>,
+    ingest_paused: Arc<AtomicU8>,
 }
 
 impl<C: Clipboard + Send + 'static> ClipboardManager<C> {
-    pub fn new(watcher: PollingWatcher<C>, history: Arc<Mutex<History>>, enabled: Arc<Mutex<bool>>) -> Self {
-        Self { watcher, history, enabled }
+    pub fn new(watcher: PollingWatcher<C>, history: Arc<Mutex<History>>, enabled: Arc<Mutex<bool>>, ingest_paused: Arc<AtomicU8>) -> Self {
+        Self { watcher, history, enabled, ingest_paused }
     }
 
     /// 执行一次轮询检查，返回是否入队
     /// 停用状态下仍 poll 以更新 last_seen，但不入队，避免再启用时把停用期最后一次复制补录
     pub fn tick(&mut self) -> bool {
-        let Some(text) = self.watcher.poll() else {
+        let polled = self.watcher.poll();
+        match self.ingest_paused.load(Ordering::SeqCst) {
+            INGEST_PAUSED => return false,
+            INGEST_CATCHUP => {
+                self.ingest_paused.store(INGEST_LIVE, Ordering::SeqCst);
+                return false;
+            }
+            _ => {}
+        }
+        let Some(text) = polled else {
             return false;
         };
         if !*self.enabled.lock() {
@@ -317,9 +332,10 @@ mod tests {
     fn manager_tick_respects_enabled_and_history() {
         let history = Arc::new(Mutex::new(History::default()));
         let enabled = Arc::new(Mutex::new(true));
+        let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
         let mock = MockClipboard::with_text("hello");
         let watcher = PollingWatcher::new(mock);
-        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled.clone());
+        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled.clone(), ingest_paused);
         // 启用，入队 "hello"
         assert!(mgr.tick());
         assert_eq!(history.lock().len(), 1);
@@ -347,9 +363,10 @@ mod tests {
     fn manager_ignores_empty_and_filters() {
         let history = Arc::new(Mutex::new(History::new(Some("secret".into()))));
         let enabled = Arc::new(Mutex::new(true));
+        let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
         let mock = MockClipboard::default();
         let watcher = PollingWatcher::new(mock);
-        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled);
+        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled, ingest_paused);
 
         mgr.watcher_mut().clipboard_mut().text = Some("   ".into());
         assert!(!mgr.tick());
@@ -386,10 +403,11 @@ mod tests {
     fn manager_transient_not_in_history() {
         let history = Arc::new(Mutex::new(History::default()));
         let enabled = Arc::new(Mutex::new(true));
+        let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
         let mut mock = MockClipboard::with_text("secret-pw");
         mock.transient = true;
         let watcher = PollingWatcher::new(mock);
-        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled);
+        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled, ingest_paused);
         assert!(!mgr.tick());
         assert_eq!(history.lock().len(), 0);
         // 之后改为非瞬态但相同文本仍不入队（已更新 last_seen）
@@ -400,5 +418,100 @@ mod tests {
         mgr.watcher_mut().clipboard_mut().text = Some("normal".into());
         assert!(mgr.tick());
         assert_eq!(history.lock().len(), 1);
+    }
+
+    #[test]
+    fn manager_tick_respects_ingest_paused() {
+        let history = Arc::new(Mutex::new(History::default()));
+        let enabled = Arc::new(Mutex::new(true));
+        let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
+        let mock = MockClipboard::with_text("hello");
+        let watcher = PollingWatcher::new(mock);
+        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled.clone(), ingest_paused.clone());
+        // 启用，入队 "hello"
+        assert!(mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        assert_eq!(history.lock().get(0).unwrap(), "hello");
+        // ingest_paused.store(PAUSED)，mock 改为 "during-paste"，tick() 为 false，历史长度仍 1
+        ingest_paused.store(INGEST_PAUSED, Ordering::SeqCst);
+        mgr.watcher_mut().clipboard_mut().text = Some("during-paste".into());
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        // ingest_paused.store(LIVE)，不改 mock，再 tick()：false，历史仍 "hello"（pause 期间 poll 已更新 last_seen）
+        ingest_paused.store(INGEST_LIVE, Ordering::SeqCst);
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        assert_eq!(history.lock().get(0).unwrap(), "hello");
+        // mock 改为 "after"，tick true，长度 2
+        mgr.watcher_mut().clipboard_mut().text = Some("after".into());
+        assert!(mgr.tick());
+        assert_eq!(history.lock().len(), 2);
+        assert_eq!(history.lock().get(0).unwrap(), "after");
+    }
+
+    #[test]
+    fn manager_tick_catchup_skips_restored() {
+        let history = Arc::new(Mutex::new(History::default()));
+        let enabled = Arc::new(Mutex::new(true));
+        let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
+        let mock = MockClipboard::with_text("hello");
+        let watcher = PollingWatcher::new(mock);
+        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled.clone(), ingest_paused.clone());
+        // hello 入队
+        assert!(mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        // 进入 PAUSED，mock 改为 "pasted-entry" 并 tick（不入队）
+        ingest_paused.store(INGEST_PAUSED, Ordering::SeqCst);
+        mgr.watcher_mut().clipboard_mut().text = Some("pasted-entry".into());
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        // 再改为 "restored-old"，切 CATCHUP，tick 返回 false、历史仍只有 hello
+        mgr.watcher_mut().clipboard_mut().text = Some("restored-old".into());
+        ingest_paused.store(INGEST_CATCHUP, Ordering::SeqCst);
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        // CATCHUP 的 tick 已把状态写回 LIVE，不要人工再 store LIVE
+        assert_eq!(ingest_paused.load(Ordering::SeqCst), INGEST_LIVE);
+        // 不改 mock 再 tick，仍 false
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        assert_eq!(history.lock().get(0).unwrap(), "hello");
+        // 最后 mock 改为 "after"，tick true，长度 2
+        mgr.watcher_mut().clipboard_mut().text = Some("after".into());
+        assert!(mgr.tick());
+        assert_eq!(history.lock().len(), 2);
+        assert_eq!(history.lock().get(0).unwrap(), "after");
+    }
+
+    #[test]
+    fn manager_tick_catchup_poll_none_transitions_to_live() {
+        let history = Arc::new(Mutex::new(History::default()));
+        let enabled = Arc::new(Mutex::new(true));
+        let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
+        let mock = MockClipboard::with_text("hello");
+        let watcher = PollingWatcher::new(mock);
+        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled.clone(), ingest_paused.clone());
+        // 1. hello 入队
+        assert!(mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        assert_eq!(history.lock().get(0).unwrap(), "hello");
+        // 2. store(PAUSED)，不改 mock，tick 为 false（poll 为 None）
+        ingest_paused.store(INGEST_PAUSED, Ordering::SeqCst);
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        // 3. store(CATCHUP)，仍不改 mock，tick 为 false，且 ingest 已是 INGEST_LIVE
+        ingest_paused.store(INGEST_CATCHUP, Ordering::SeqCst);
+        assert!(!mgr.tick());
+        assert_eq!(ingest_paused.load(Ordering::SeqCst), INGEST_LIVE);
+        assert_eq!(history.lock().len(), 1);
+        // 4. 不改 mock 再 tick，仍 false，历史仍 1 条 hello
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        assert_eq!(history.lock().get(0).unwrap(), "hello");
+        // 5. mock 改为 "after"，tick true，长度 2
+        mgr.watcher_mut().clipboard_mut().text = Some("after".into());
+        assert!(mgr.tick());
+        assert_eq!(history.lock().len(), 2);
+        assert_eq!(history.lock().get(0).unwrap(), "after");
     }
 }

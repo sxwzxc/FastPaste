@@ -4,6 +4,54 @@ use std::{thread, time::Duration};
 use crate::clipboard::Clipboard;
 use crate::config::PasteMethod;
 
+pub fn wait_for_hotkey_release(timeout: Duration) {
+    #[cfg(windows)]
+    {
+        wait_for_hotkey_release_windows(timeout);
+    }
+    #[cfg(not(windows))]
+    {
+        // 无 GetAsyncKeyState 时退化为短睡眠，覆盖松键时间
+        let cap = timeout.min(Duration::from_millis(200));
+        thread::sleep(cap);
+    }
+}
+
+#[cfg(windows)]
+fn wait_for_hotkey_release_windows(timeout: Duration) {
+    // GetAsyncKeyState：最高位为 1 表示当前按下
+    extern "system" {
+        fn GetAsyncKeyState(vkey: i32) -> i16;
+    }
+    const VK_SHIFT: i32 = 0x10;
+    const VK_CONTROL: i32 = 0x11;
+    const VK_MENU: i32 = 0x12; // Alt
+    const VK_LWIN: i32 = 0x5B;
+    const VK_RWIN: i32 = 0x5C;
+    fn down(vk: i32) -> bool {
+        unsafe { GetAsyncKeyState(vk) as u16 & 0x8000 != 0 }
+    }
+    let start = std::time::Instant::now();
+    loop {
+        let digit_down = (0x30..=0x39).any(down); // '0'..'9'
+        let busy = down(VK_SHIFT)
+            || down(VK_CONTROL)
+            || down(VK_MENU)
+            || down(VK_LWIN)
+            || down(VK_RWIN)
+            || digit_down;
+        if !busy {
+            thread::sleep(Duration::from_millis(20));
+            return;
+        }
+        if start.elapsed() >= timeout {
+            log::warn!("等待热键松开超时 {:?}，仍尝试粘贴", timeout);
+            return;
+        }
+        thread::sleep(Duration::from_millis(10));
+    }
+}
+
 /// 粘贴器 trait，便于测试
 pub trait Paster: Send {
     fn paste_text(&mut self, text: &str) -> Result<()>;
@@ -30,7 +78,13 @@ impl EnigoPaster {
             self.enigo.key(Key::Unicode('v'), Direction::Click)?;
             self.enigo.key(Key::Meta, Direction::Release)?;
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(target_os = "windows")]
+        {
+            self.enigo.key(Key::Control, Direction::Press)?;
+            self.enigo.key(Key::V, Direction::Click)?;
+            self.enigo.key(Key::Control, Direction::Release)?;
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             self.enigo.key(Key::Control, Direction::Press)?;
             self.enigo.key(Key::Unicode('v'), Direction::Click)?;
@@ -42,6 +96,7 @@ impl EnigoPaster {
 
 impl Paster for EnigoPaster {
     fn paste_text(&mut self, text: &str) -> Result<()> {
+        wait_for_hotkey_release(Duration::from_millis(800));
         use enigo::Keyboard;
         self.enigo.text(text)?;
         Ok(())
@@ -54,6 +109,7 @@ impl Paster for EnigoPaster {
             None
         };
 
+        wait_for_hotkey_release(Duration::from_millis(800));
         clipboard.set_text(text)?;
         // 等待剪贴板写入生效
         thread::sleep(Duration::from_millis(50));
@@ -246,6 +302,26 @@ mod tests {
             err_str2.contains("clipboard_write_failed"),
             "set_text 失败时应含 clipboard_write_failed，实际: {}",
             err_str2
+        );
+    }
+
+    #[test]
+    fn wait_for_hotkey_release_zero_returns_quickly() {
+        let start = std::time::Instant::now();
+        wait_for_hotkey_release(Duration::from_millis(0));
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "wait_for_hotkey_release(0) should return quickly"
+        );
+    }
+
+    #[test]
+    fn wait_for_hotkey_release_one_ms_returns_quickly() {
+        let start = std::time::Instant::now();
+        wait_for_hotkey_release(Duration::from_millis(1));
+        assert!(
+            start.elapsed() < Duration::from_millis(500),
+            "wait_for_hotkey_release(1ms) should return quickly"
         );
     }
 }

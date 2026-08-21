@@ -2,12 +2,21 @@
 
 所有显著变更将记录于此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.2] - 2026-08-21
+
+### Fixed
+- `src/clipboard.rs:290` `tick()` 时序修复：每次 tick 先 `poll()` 再判断三态；`INGEST_CATCHUP` 时无论 `poll()` 为 `Some` 还是 `None` 都 `store(INGEST_LIVE)` 且不入队，修复 `CATCHUP` 在 `poll=None` 时卡住不回 `LIVE` 的问题
+- 粘贴期间剪贴板暂停入队：`src/app.rs:15` 新增 `PasteGate` 单次飞行 + `ingest_paused` 三态（`LIVE/PAUSED/CATCHUP`），`handle_paste` 中 `PasteGuard` Drop 时 `store(CATCHUP)`，`spawn_clipboard_thread` 透传 `ingest_paused` 至 `ClipboardManager`
+- 热键稳定性：`src/hotkey.rs:95` 仅处理 `Pressed` 状态，过滤 `Released`/重复事件；`src/paste.rs:7` 粘贴前 `wait_for_hotkey_release(800ms)` 等待修饰键松开，Windows 改用虚拟键 `Key::V` 注入
+- `src/config.rs:135` `documented_toml` 默认写出的 `config.toml` 带英文注释，`ignore_regex` 含引号时正确转义并可往返加载
+
 ## [0.2.1] - 2026-08-21
 
 ### Added
 - 图标重设计：全新剪贴板 + 闪电简洁图标，适配亮/暗任务栏，高对比度，16px 仍清晰（`assets/icon.ico` 多尺寸、`assets/icon.png`、`assets/preview.png`）
 - `assets/generate_icon.py` 一键生成多尺寸图标（16/20/24/32/48/64/256/512）与 ICO
 - `src/icon_data.rs` 嵌入 32x32 RGBA，`tray.rs:162` 改用新图标，告别纯蓝方块
+- 默认写出的 `config.toml` 带英文注释
 
 ### Changed
 - `build.rs` 同时嵌入图标与 manifest（`1 ICON` + `1 24`），`debug` 版本号同步至 0.2.1.0
@@ -15,6 +24,8 @@
 
 ### Fixed
 - 托盘图标在亮色任务栏下可见性差、细节丢失
+- 热键仍按下时模拟 Ctrl+V 无法注入焦点窗口；现等待松开，Windows 改用 `Key::V`
+- 热键 Released/连发导致重复或失败粘贴，现仅处理 Pressed 且同一时刻只允许一次粘贴；粘贴期间不把剪贴板变化入队
 
 ## [0.2.0] - 2026-08-21
 

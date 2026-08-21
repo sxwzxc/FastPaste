@@ -132,9 +132,69 @@ impl Config {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).context("创建配置目录失败")?;
         }
-        let content = toml::to_string_pretty(self).context("序列化配置失败")?;
+        let content = self.documented_toml();
         std::fs::write(path, content).context("写入配置文件失败")?;
         Ok(())
+    }
+
+    fn documented_toml(&self) -> String {
+        // hotkeys line via toml serialization to keep escaping correct
+        let hotkeys_line = {
+            #[derive(Serialize)]
+            struct Tmp {
+                hotkeys: Vec<String>,
+            }
+            let tmp = Tmp { hotkeys: self.hotkeys.clone() };
+            toml::to_string(&tmp).unwrap().trim().to_string()
+        };
+        let ignore_regex_line = match &self.ignore_regex {
+            Some(val) => {
+                #[derive(Serialize)]
+                struct Tmp {
+                    ignore_regex: String,
+                }
+                let tmp = Tmp { ignore_regex: val.clone() };
+                let s = toml::to_string(&tmp).unwrap();
+                // s is 'ignore_regex = "..."\n'
+                s.trim().to_string()
+            }
+            None => "# ignore_regex = \"password|secret\"".to_string(),
+        };
+        let mut out = String::new();
+        out.push_str("# FastPaste configuration\n");
+        out.push_str("# Edit this file, then use Reload configuration on the tray.\n");
+        out.push_str("# Invalid values are rejected and the previous configuration is kept.\n");
+        out.push_str("\n");
+        out.push_str("# Ten hotkeys, in order. Index 0 = newest history item; index 9 = oldest.\n");
+        out.push_str("# Format: modifier+modifier+key e.g. ctrl+shift+1\n");
+        out.push_str("# Modifiers: ctrl, shift, alt, super (aliases: cmd, command, win, meta).\n");
+        out.push_str("# Key: 0-9, a-z, or a global-hotkey Code name such as F5 or space.\n");
+        out.push_str(&hotkeys_line);
+        out.push_str("\n");
+        out.push_str("\n");
+        out.push_str("# If true, a clipboard paste restores the previous clipboard after injecting.\n");
+        out.push_str("# If false, the pasted entry is left on the clipboard.\n");
+        out.push_str(&format!("preserve_clipboard = {}\n", self.preserve_clipboard));
+        out.push_str("\n");
+        out.push_str("# How to inject into the focused window.\n");
+        out.push_str("# clipboard = copy onto the clipboard then Ctrl+V (Cmd+V on macOS). Default.\n");
+        out.push_str("# type = synthesize keystrokes; does not change the clipboard.\n");
+        out.push_str(&format!("paste_method = \"{}\"\n", self.paste_method));
+        out.push_str("\n");
+        out.push_str("# Clipboard poll interval in milliseconds. Minimum 50.\n");
+        out.push_str(&format!("polling_interval_ms = {}\n", self.polling_interval_ms));
+        out.push_str("\n");
+        out.push_str("# Max bytes for one history entry. Inclusive range 1 ..= 52428800 (50 MiB).\n");
+        out.push_str(&format!("max_entry_bytes = {}\n", self.max_entry_bytes));
+        out.push_str("\n");
+        out.push_str("# Optional regex; matching text is not stored. Uncomment to enable:\n");
+        out.push_str(&ignore_regex_line);
+        out.push_str("\n");
+        out.push_str("\n");
+        out.push_str("# Windows: when enabling autostart, request a highest-privilege logon task.\n");
+        out.push_str("# true = HIGHEST. false is ignored by the tray today (always HIGHEST); kept for the file format.\n");
+        out.push_str(&format!("autostart_elevated = {}\n", self.autostart_elevated));
+        out
     }
 
     pub fn validate(&self) -> Result<()> {
@@ -338,5 +398,33 @@ mod tests {
         cfg.save_to(&path).unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.ignore_regex, Some("password".into()));
+    }
+
+    #[test]
+    fn save_to_contains_fastpaste_configuration() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = Config::default();
+        cfg.save_to(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("FastPaste configuration"));
+        let lines: Vec<&str> = content.lines().collect();
+        let idx = lines.iter().position(|l| l.contains("paste_method")).expect("paste_method not found");
+        let start = idx.saturating_sub(5);
+        let end = (idx + 5).min(lines.len());
+        let window = lines[start..end].join("\n");
+        assert!(window.contains("clipboard"), "window missing clipboard: {}", window);
+        assert!(window.contains("type"), "window missing type: {}", window);
+    }
+
+    #[test]
+    fn save_load_ignore_regex_escaped() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.ignore_regex = Some("a\"b".into());
+        cfg.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.ignore_regex, Some("a\"b".into()));
     }
 }

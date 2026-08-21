@@ -1,13 +1,34 @@
 use anyhow::Result;
 use parking_lot::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
+
+use crate::clipboard::{INGEST_CATCHUP, INGEST_LIVE, INGEST_PAUSED};
 
 use crate::clipboard::{ArboardClipboard, Clipboard, ClipboardManager, PollingWatcher};
 use crate::config::Config;
 use crate::history::History;
 use crate::paste::{do_paste, EnigoPaster};
+
+pub struct PasteGate {
+    busy: AtomicBool,
+}
+
+impl PasteGate {
+    pub fn new() -> Self {
+        Self { busy: AtomicBool::new(false) }
+    }
+    pub fn try_begin(&self) -> bool {
+        self.busy
+            .compare_exchange(false, true, Ordering::SeqCst, Ordering::SeqCst)
+            .is_ok()
+    }
+    pub fn end(&self) {
+        self.busy.store(false, Ordering::SeqCst);
+    }
+}
 
 #[derive(Clone)]
 pub struct AppState {
@@ -15,6 +36,8 @@ pub struct AppState {
     pub enabled: Arc<Mutex<bool>>,
     pub config: Arc<Mutex<Config>>,
     pub pending_notice: Arc<Mutex<Option<(String, String)>>>,
+    pub paste_gate: Arc<PasteGate>,
+    pub ingest_paused: Arc<AtomicU8>,
 }
 
 impl AppState {
@@ -27,7 +50,9 @@ impl AppState {
         let enabled = Arc::new(Mutex::new(true));
         let config = Arc::new(Mutex::new(config));
         let pending_notice = Arc::new(Mutex::new(None));
-        Self { history, enabled, config, pending_notice }
+        let paste_gate = Arc::new(PasteGate::new());
+        let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
+        Self { history, enabled, config, pending_notice, paste_gate, ingest_paused }
     }
 
     pub fn push_history(&self, text: String) -> bool {
@@ -66,6 +91,7 @@ pub fn spawn_clipboard_thread(state: AppState) {
     let history = state.history.clone();
     let enabled = state.enabled.clone();
     let config = state.config.clone();
+    let ingest_paused = state.ingest_paused.clone();
 
     thread::spawn(move || {
         let clipboard = match ArboardClipboard::new() {
@@ -76,7 +102,7 @@ pub fn spawn_clipboard_thread(state: AppState) {
             }
         };
         let watcher = PollingWatcher::new(clipboard);
-        let mut manager = ClipboardManager::new(watcher, history, enabled);
+        let mut manager = ClipboardManager::new(watcher, history, enabled, ingest_paused);
         loop {
             let interval = {
                 let cfg = config.lock();
@@ -106,9 +132,29 @@ pub fn handle_paste(state: &AppState, digit: u8) {
         (cfg.paste_method, cfg.preserve_clipboard)
     };
 
+    if !state.paste_gate.try_begin() {
+        log::info!("粘贴进行中，忽略重复热键 digit={}", digit);
+        return;
+    }
+
     // 剪贴板与粘贴需在短期线程中执行，失败时通过 pending_notice 让主线程弹窗（避免在工作线程直接弹 rfd）
     let state_clone = state.clone();
     thread::spawn(move || {
+        struct PasteGuard {
+            gate: Arc<PasteGate>,
+            ingest: Arc<AtomicU8>,
+        }
+        impl Drop for PasteGuard {
+            fn drop(&mut self) {
+                self.ingest.store(INGEST_CATCHUP, Ordering::SeqCst);
+                self.gate.end();
+            }
+        }
+        let _guard = PasteGuard {
+            gate: state_clone.paste_gate.clone(),
+            ingest: state_clone.ingest_paused.clone(),
+        };
+        state_clone.ingest_paused.store(INGEST_PAUSED, Ordering::SeqCst);
         let mut clipboard = match ArboardClipboard::new() {
             Ok(cb) => cb,
             Err(e) => {
@@ -142,4 +188,18 @@ pub fn handle_paste(state: &AppState, digit: u8) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn paste_gate_single_flight() {
+        let g = PasteGate::new();
+        assert!(g.try_begin());
+        assert!(!g.try_begin());
+        g.end();
+        assert!(g.try_begin());
+    }
 }

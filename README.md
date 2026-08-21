@@ -1,7 +1,7 @@
 # FastPaste
 
 <!-- release-info:start -->
-> **当前版本**: `v0.2.1` | **构建时间**: 2026-08-21 14:47:53 | **Commit**: `0852df3`
+> **当前版本**: `v0.2.2` | **构建时间**: 2026-08-21 16:28:18 | **Commit**: `df972e6`
 <!-- release-info:end -->
 
 跨平台静默剪贴板管理器，常驻托盘、监听剪贴板、通过全局热键将最近 10 条纯文本条目直接粘贴到焦点窗口。
@@ -10,7 +10,7 @@
 
 - **历史**：容量为 10 的环形队列，按复制时间倒序，`1` 为最新，`0` 为最旧。去重后置顶，空或纯空白不入队，超过 `max_entry_bytes`（默认 5MB）的条目不视为条目。
 - **敏感内容**：被系统标记为瞬态（transient）或匹配 `ignore_regex` 的文本不进入历史。Windows 下检测 `ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory` / `ClipboardViewerIgnore` 等格式；macOS 暂未实现则视为非敏感内容。
-- **粘贴**：将指定条目直接注入到当前焦点窗口的输入焦点。默认 `paste_method = clipboard` 采用备份-粘贴-恢复路径，失败时写入剪贴板并在主线程对话框提示用户手动粘贴；可切换 `paste_method = type` 逐字击键。
+- **粘贴**：将指定条目直接注入到当前焦点窗口的输入焦点。默认 `paste_method = clipboard` 采用备份-粘贴-恢复路径，失败时写入剪贴板并在主线程对话框提示用户手动粘贴；可切换 `paste_method = type` 逐字击键。热键触发的粘贴会先等待修饰键松开，再向焦点窗口发送 Ctrl+V（Windows 使用虚拟键 `V`）。热键只在 Pressed 触发，进行中的粘贴会忽略重复热键。
 - **保留剪贴板**：开关 `preserve_clipboard`，`true` 时执行备份-粘贴-恢复，支持文本与图片的恢复。
 
 ## 热键
@@ -46,6 +46,8 @@ max_entry_bytes = 5242880 # 5MB
 ignore_regex = "password|secret"
 autostart_elevated = true
 ```
+
+配置文件由英文注释说明每个键与合法取值，修改后通过托盘 **重载配置** 生效。粘贴进行时暂时不把剪贴板变化记入历史，避免把恢复的旧剪贴板当成新复制。
 
 `validate` 会校验热键数量、轮询间隔、`max_entry_bytes` 范围及 `ignore_regex` 合法性。校验失败时重载配置会弹对话框且不应用。
 

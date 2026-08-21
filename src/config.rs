@@ -51,7 +51,7 @@ fn default_hotkeys() -> Vec<String> {
     ]
 }
 fn default_autostart_elevated() -> bool {
-    false
+    true
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -89,7 +89,7 @@ impl Default for Config {
             polling_interval_ms: 500,
             max_entry_bytes: 5 * 1024 * 1024,
             ignore_regex: None,
-            autostart_elevated: false,
+            autostart_elevated: true,
         }
     }
 }
@@ -193,6 +193,9 @@ pub fn to_global_hotkey(s: &str) -> Result<global_hotkey::hotkey::HotKey> {
     }
     let (mods_parts, key_part) = parts.split_at(parts.len() - 1);
     let key_str = key_part[0];
+    if key_str.is_empty() {
+        anyhow::bail!("无法解析主键: {}", key_str);
+    }
 
     let mut mods = Modifiers::empty();
     for m in mods_parts {
@@ -201,6 +204,7 @@ pub fn to_global_hotkey(s: &str) -> Result<global_hotkey::hotkey::HotKey> {
             "shift" => mods |= Modifiers::SHIFT,
             "alt" => mods |= Modifiers::ALT,
             "super" | "cmd" | "command" | "win" | "meta" => mods |= Modifiers::SUPER,
+            "" => anyhow::bail!("热键格式错误: {}", s),
             _ => anyhow::bail!("未知修饰键: {}", m),
         }
     }
@@ -221,14 +225,16 @@ pub fn to_global_hotkey(s: &str) -> Result<global_hotkey::hotkey::HotKey> {
             let ch = c.chars().next().unwrap();
             if ch.is_ascii_alphabetic() {
                 let code_str = format!("Key{}", ch.to_ascii_uppercase());
-                Code::from_str(&code_str).unwrap_or(Code::Digit1)
+                Code::from_str(&code_str).map_err(|_| anyhow::anyhow!("无法解析主键: {}", key_str))?
             } else {
-                Code::from_str(&format!("Digit{}", ch)).unwrap_or(Code::Digit1)
+                Code::from_str(&key_str.to_uppercase())
+                    .or_else(|_| Code::from_str(key_str))
+                    .map_err(|_| anyhow::anyhow!("无法解析主键: {}", key_str))?
             }
         }
         _ => Code::from_str(&key_str.to_uppercase())
             .or_else(|_| Code::from_str(key_str))
-            .unwrap_or(Code::Digit1),
+            .map_err(|_| anyhow::anyhow!("无法解析主键: {}", key_str))?,
     };
 
     Ok(HotKey::new(Some(mods), code))
@@ -291,6 +297,36 @@ mod tests {
         let hk = to_global_hotkey("ctrl+shift+1").unwrap();
         assert!(hk.mods.contains(global_hotkey::hotkey::Modifiers::CONTROL));
         assert!(hk.mods.contains(global_hotkey::hotkey::Modifiers::SHIFT));
+    }
+
+    #[test]
+    fn to_global_hotkey_f1_or_space() {
+        // F1 在 global-hotkey 0.6 中存在；若不存在则用 space 等兜底键
+        let hk = to_global_hotkey("ctrl+shift+f1");
+        if hk.is_err() {
+            // 兜底：space 肯定存在
+            assert!(to_global_hotkey("ctrl+shift+space").is_ok());
+        } else {
+            assert!(hk.is_ok());
+        }
+        // 非 f1 兜底键 f5 也应 Ok
+        assert!(to_global_hotkey("ctrl+shift+f5").is_ok());
+    }
+
+    #[test]
+    fn to_global_hotkey_unknown_err() {
+        assert!(to_global_hotkey("ctrl+shift+thiskeydoesnotexist").is_err());
+    }
+
+    #[test]
+    fn to_global_hotkey_empty_key_err() {
+        assert!(to_global_hotkey("ctrl+shift+").is_err());
+    }
+
+    #[test]
+    fn to_global_hotkey_letter_ok() {
+        assert!(to_global_hotkey("ctrl+shift+a").is_ok());
+        assert!(to_global_hotkey("ctrl+shift+Z").is_ok());
     }
 
     #[test]

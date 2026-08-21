@@ -1,10 +1,10 @@
 [package]
 name = "fastpaste"
-version = "0.1.0"
+version = "0.2.0"
 edition = "2021"
 description = "跨平台静默剪贴板管理器 - 常驻托盘、监听剪贴板、全局热键粘贴最近10条"
 license = "MIT"
-repository = "https://github.com/fastpaste/fastpaste"
+repository = "https://github.com/sxwzxc/FastPaste"
 keywords = ["clipboard", "tray", "hotkey", "productivity"]
 authors = ["FastPaste Team"]
 rust-version = "1.70"
@@ -32,6 +32,12 @@ rfd = "0.15"
 parking_lot = "0.12"
 single-instance = "0.3"
 is_elevated = "0.1"
+
+[build-dependencies]
+embed-resource = "3"
+
+[target.'cfg(windows)'.dependencies]
+clipboard-win = "5"
 
 [dev-dependencies]
 tempfile = "3.10"

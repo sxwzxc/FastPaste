@@ -2,24 +2,42 @@
 
 所有显著变更将记录于此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.0] - 2026-08-21
+
+### Added
+- 一键编译：`build.bat`/`build.ps1`（默认 `cargo build`，` -Release` 切 `release`，支持 `-Test`/`-Run`，`Bypass` 绕过执行策略）
+- 一键发布：`release.bat`/`release.ps1`（`cargo test` → `cargo build --release` → 更新 `README` 顶部 `release-info` 与 `CHANGELOG` → 复制 `dist/fastpaste.exe` + `sha256`），双击即可编译，`SkipTest`/`SkipBuild` 可跳步
+- `build.rs` + `app.manifest`：`release` 嵌入 `requireAdministrator`，`debug`/`test` 嵌入 `asInvoker`，避免 `cargo test` 触发 UAC
+
+### Changed
+- `.gitignore` 新增 `/dist/`，忽略发布产物
+- `Cargo.toml` 仓库地址更正为 `sxwzxc/FastPaste`，补 `build-dependencies = embed-resource` 与 `clipboard-win`
+- `README.md` 新增、细化一键 Release 文档与 `release-info` 自动更新
+- `AGENTS.md` / `docs/agents/*` / `CONTEXT.md` 引入，明确 Issue 跟踪与领域术语
+- `src/*` 细节打磨：剪贴板敏感过滤、历史预览、粘贴备份恢复、热键解析、自启/托盘/权限诊断等与文档对齐
+
+### Fixed
+- `release.ps1` 修复 `app.manifest` 版本替换误命中 `<?xml version>` 的问题
+
 ## [0.1.0] - 2026-08-21
 
 ### Added
 - 初始版本：跨平台静默剪贴板管理器
-- 历史：容量 10 的环形队列，去重并置顶，空/纯空白忽略，单条 5MB 上限，非文本静默忽略
-- 敏感内容过滤：transient 标记与 `ignore_regex` 正则过滤
-- 全局热键：`Ctrl+Shift+1..0`（1 为最新）直接粘贴到焦点窗口，支持热键冲突部分可用提示
-- 粘贴策略：默认 `clipboard` 备份-粘贴-恢复（`preserve_clipboard=true`），可切换 `type` 逐字击键，失败降级为仅写剪贴板
-- 托盘：唯一常驻界面，承载启用/停用、历史预览（20字符脱敏）、打开配置、重载配置、自启开关、权限诊断、退出
-- 配置：`config.toml` 持久化于系统配置目录，支持热键自定义 `ctrl+shift+1` 格式，校验失败对话框提示
-- 单实例：named mutex / file lock，第二实例唤醒已有实例
-- 自启：Windows Task Scheduler 提权任务 / macOS LaunchAgent，托盘一键切换，默认关闭
-- 权限：默认请求管理员权限启动（Windows `requireAdministrator`），macOS 引导 Accessibility 授权
-- 轮询监听：500ms `arboard` 轮询，预留 `ClipboardWatcher` trait
-- 引入版本号与更新日志
+- 历史：容量 10 的环形队列，去重并置顶，空/纯空白忽略，单条 5MB 上限（`max_entry_bytes` 可配置，重载配置即时生效），非文本静默忽略；历史预览约 200ms 刷新，`digit: ` + 前 20 字且换行转空格，空则 `(空)` 且不可点
+- 敏感内容过滤：Windows 检测常见 transient 格式（`ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory` / `ClipboardViewerIgnore`），macOS 未实现则视为非敏感，配合 `ignore_regex` 正则过滤
+- 全局热键：`Ctrl+Shift+1..0`（1 为最新）直接粘贴到焦点窗口，支持热键冲突部分可用提示；未知主键报错不再回退为 `Digit1`
+- 粘贴策略：默认 `clipboard` 备份-粘贴-恢复（`preserve_clipboard=true`，支持文本与图片恢复），可切换 `type` 逐字击键，粘贴失败主线程对话框提示，并写入剪贴板
+- 托盘：唯一常驻界面，承载启用/停用、历史预览（20字符脱敏）、打开配置、重载配置、自启开关、权限诊断、退出；启用/停用通过 `HotkeyManager::set_enabled` 切换
+- 配置：`config.toml` 持久化于系统配置目录，支持热键自定义 `ctrl+shift+1` 格式，校验失败对话框提示；重载配置走 `AppState::reload_config` 统一路径
+- 单实例：named mutex / file lock，第二实例退出并提示已在运行
+- 自启：Windows Task Scheduler 登录触发最高权限（`HIGHEST`）任务 / macOS LaunchAgent，托盘一键切换，开启失败不写注册表，关闭时删除任务并清理注册表残留；默认 `autostart_elevated = true`
+- 权限：`cargo build --release` / 发布 exe 嵌入 `requireAdministrator` manifest（Windows），启动由系统弹 UAC；`debug` 与 `cargo test` 嵌入 `asInvoker` 不强制 UAC，未提权时仍走 PowerShell try_elevate，拒绝则原进程继续运行；以管理员身份常驻会扩大剪贴板中敏感内容的暴露面，macOS 引导 Accessibility 授权并提示风险（辅助功能授权后可向其它窗口注入按键，请只在信任时开启）
+- 轮询监听：500ms `arboard` 轮询，停用期复制不补录（停用时仍 `poll` 更新 `last_seen`），预留 `ClipboardWatcher` trait
+- 引入版本号与更新日志（关于对话框与诊断均使用 `env!("CARGO_PKG_VERSION")`）
 
 ### ADR
 - 0001 Rust + tray-icon 静默后台
 - 0002 轮询式剪贴板监听
 - 0003 enigo 备份-粘贴-恢复策略
 - 0004 默认提权启动与 Task Scheduler 提权自启
+

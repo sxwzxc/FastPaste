@@ -44,17 +44,30 @@ fn task_name() -> String {
 
 #[cfg(target_os = "windows")]
 fn is_enabled_windows() -> bool {
-    let output = std::process::Command::new("schtasks")
+    let task_exists = std::process::Command::new("schtasks")
         .args(["/Query", "/TN", &task_name()])
-        .output();
-    match output {
-        Ok(o) => o.status.success(),
-        Err(_) => false,
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    if task_exists {
+        return true;
     }
+    // 兼容旧注册表残留：若任务不存在但 Run 键存在，也视为已开启
+    let reg_exists = std::process::Command::new("reg")
+        .args([
+            "query",
+            r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run",
+            "/v",
+            "FastPaste",
+        ])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false);
+    reg_exists
 }
 
 #[cfg(target_os = "windows")]
-fn set_enabled_windows(enable: bool, elevated: bool) -> Result<()> {
+fn set_enabled_windows(enable: bool, _elevated: bool) -> Result<()> {
     let exe = exe_path()?;
     let exe_str = exe.display().to_string();
     if enable {
@@ -71,10 +84,9 @@ fn set_enabled_windows(enable: bool, elevated: bool) -> Result<()> {
             "/SC".to_string(),
             "ONLOGON".to_string(),
             "/RL".to_string(),
-            if elevated { "HIGHEST".to_string() } else { "LIMITED".to_string() },
+            "HIGHEST".to_string(),
             "/F".to_string(),
         ];
-        // 若 elevated，需要以管理员身份创建，schtasks 会自动触发 UAC（若当前非提权会失败）
         let output = std::process::Command::new("schtasks")
             .args(&args)
             .output()
@@ -82,11 +94,6 @@ fn set_enabled_windows(enable: bool, elevated: bool) -> Result<()> {
         if !output.status.success() {
             let stderr = String::from_utf8_lossy(&output.stderr);
             let stdout = String::from_utf8_lossy(&output.stdout);
-            // 回退到注册表方式（非提权）
-            if elevated {
-                log::warn!("提权任务创建失败，回退到普通自启: {} {}", stdout, stderr);
-                return set_enabled_windows_registry(true);
-            }
             anyhow::bail!("创建自启任务失败: {} {}", stdout, stderr);
         }
         Ok(())
@@ -94,30 +101,19 @@ fn set_enabled_windows(enable: bool, elevated: bool) -> Result<()> {
         let _ = std::process::Command::new("schtasks")
             .args(["/Delete", "/TN", &task_name(), "/F"])
             .output();
-        // 同时清理注册表残留
+        // 同时清理可能残留的注册表值
         let _ = set_enabled_windows_registry(false);
         Ok(())
     }
 }
 
 #[cfg(target_os = "windows")]
-fn set_enabled_windows_registry(enable: bool) -> Result<()> {
-    // 使用 reg 命令操作 HKCU\Software\Microsoft\Windows\CurrentVersion\Run
+fn set_enabled_windows_registry(_enable: bool) -> Result<()> {
+    // 仅用于清理残留的 Run 键；开启自启不再写入注册表，关闭时只 delete
     let key = r"HKCU\Software\Microsoft\Windows\CurrentVersion\Run";
-    if enable {
-        let exe = exe_path()?;
-        let output = std::process::Command::new("reg")
-            .args(["add", key, "/v", "FastPaste", "/t", "REG_SZ", "/d", &exe.display().to_string(), "/f"])
-            .output()
-            .context("reg add 失败")?;
-        if !output.status.success() {
-            anyhow::bail!("注册表自启设置失败");
-        }
-    } else {
-        let _ = std::process::Command::new("reg")
-            .args(["delete", key, "/v", "FastPaste", "/f"])
-            .output();
-    }
+    let _ = std::process::Command::new("reg")
+        .args(["delete", key, "/v", "FastPaste", "/f"])
+        .output();
     Ok(())
 }
 

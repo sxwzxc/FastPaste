@@ -9,19 +9,25 @@ use crate::config::Config;
 use crate::history::History;
 use crate::paste::{do_paste, EnigoPaster};
 
+#[derive(Clone)]
 pub struct AppState {
     pub history: Arc<Mutex<History>>,
     pub enabled: Arc<Mutex<bool>>,
     pub config: Arc<Mutex<Config>>,
+    pub pending_notice: Arc<Mutex<Option<(String, String)>>>,
 }
 
 impl AppState {
     pub fn new(config: Config) -> Self {
         let ignore = config.ignore_regex.clone();
-        let history = Arc::new(Mutex::new(History::new(ignore)));
+        let history = Arc::new(Mutex::new(History::with_limits(
+            ignore,
+            config.max_entry_bytes,
+        )));
         let enabled = Arc::new(Mutex::new(true));
         let config = Arc::new(Mutex::new(config));
-        Self { history, enabled, config }
+        let pending_notice = Arc::new(Mutex::new(None));
+        Self { history, enabled, config, pending_notice }
     }
 
     pub fn push_history(&self, text: String) -> bool {
@@ -42,17 +48,16 @@ impl AppState {
         *self.enabled.lock() = v;
     }
 
-    pub fn reload_config(&self) -> Result<Vec<(u8, String)>> {
+    pub fn reload_config(&self) -> Result<Config> {
         let new_cfg = Config::load()?;
         new_cfg.validate()?;
-        let mut cfg = self.config.lock();
-        // 更新历史的 ignore_regex
         {
             let mut h = self.history.lock();
             h.set_ignore_regex(new_cfg.ignore_regex.clone());
+            h.set_max_bytes(new_cfg.max_entry_bytes);
         }
-        *cfg = new_cfg;
-        Ok(vec![])
+        *self.config.lock() = new_cfg.clone();
+        Ok(new_cfg)
     }
 }
 
@@ -101,12 +106,17 @@ pub fn handle_paste(state: &AppState, digit: u8) {
         (cfg.paste_method, cfg.preserve_clipboard)
     };
 
-    // 剪贴板与粘贴需在主线程或短期线程中执行
+    // 剪贴板与粘贴需在短期线程中执行，失败时通过 pending_notice 让主线程弹窗（避免在工作线程直接弹 rfd）
+    let state_clone = state.clone();
     thread::spawn(move || {
         let mut clipboard = match ArboardClipboard::new() {
             Ok(cb) => cb,
             Err(e) => {
                 log::error!("剪贴板初始化失败: {}", e);
+                *state_clone.pending_notice.lock() = Some((
+                    "FastPaste".into(),
+                    "粘贴失败，无法访问剪贴板".into(),
+                ));
                 return;
             }
         };
@@ -117,9 +127,18 @@ pub fn handle_paste(state: &AppState, digit: u8) {
             Ok(_) => log::info!("粘贴成功 digit={} len={}", digit, text.len()),
             Err(e) => {
                 log::error!("粘贴失败: {}", e);
-                // 降级提示
-                let _ = clipboard_ref.set_text(&text);
-                crate::dialog::show_warning("FastPaste", "粘贴失败，已复制到剪贴板，请手动 Ctrl+V");
+                let body = if method == crate::config::PasteMethod::Type {
+                    "粘贴失败（逐字击键未成功）"
+                } else {
+                    let err_str = format!("{:?}", e);
+                    if err_str.contains("clipboard_write_failed") {
+                        "粘贴失败，且未能把条目放到系统剪贴板"
+                    } else {
+                        "粘贴失败，已写入剪贴板，请手动粘贴"
+                    }
+                };
+                *state_clone.pending_notice.lock() =
+                    Some(("FastPaste".into(), body.into()));
             }
         }
     });

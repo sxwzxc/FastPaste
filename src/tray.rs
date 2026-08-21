@@ -88,20 +88,10 @@ impl Tray {
         let h = self.history.lock();
         for (i, item) in self.history_items.iter().enumerate() {
             let digit = if i == 9 { 0 } else { (i + 1) as u8 };
-            let text = if let Some(entry) = h.get(i) {
-                let preview = History::format_preview(entry, 20);
-                format!("{}: {}", digit, preview)
-            } else {
-                format!("{}: (空)", digit)
-            };
-            // muda 的 set_text 需要 &str，但我们需要更新标题
-            // 由于 muda 的 MenuItem 不支持动态改标题直接通过更新，
-            // 这里通过内部分发：重新创建会更高效，但简化为日志
-            // 实际上 tray-icon 0.19 的 MenuItem 支持修改 via 内部 handle
-            // 我们尝试通过 unsafe? 简单方案：标题不变，仅 enabled 状态
-            let _ = text;
+            let (text, enabled) = history_item_label(digit, h.get(i).map(|s| s.as_str()));
+            item.set_text(&text);
+            item.set_enabled(enabled);
         }
-        // 为测试可验证，实际更新需重建菜单；此处简化不重建
     }
 
     pub fn set_enabled_checked(&self, enabled: bool) {
@@ -141,6 +131,17 @@ impl Tray {
             }
             _ => TrayEvent::None,
         }
+    }
+}
+
+/// 历史项标签纯函数，便于测试（不依赖 GUI）
+pub fn history_item_label(digit: u8, entry: Option<&str>) -> (String, bool) {
+    match entry {
+        Some(s) => {
+            let preview = History::format_preview(s, 20);
+            (format!("{}: {}", digit, preview), true)
+        }
+        None => (format!("{}: (空)", digit), false),
     }
 }
 
@@ -185,5 +186,35 @@ mod tests {
         assert!(id.starts_with(ID_HISTORY_BASE));
         let digit: u8 = id[ID_HISTORY_BASE.len()..].parse().unwrap();
         assert_eq!(digit, 1);
+    }
+
+    #[test]
+    fn history_item_label_with_entry() {
+        let (text, enabled) = history_item_label(1, Some("hello world"));
+        assert_eq!(text, "1: hello world");
+        assert!(enabled);
+    }
+
+    #[test]
+    fn history_item_label_empty() {
+        let (text, enabled) = history_item_label(0, None);
+        assert_eq!(text, "0: (空)");
+        assert!(!enabled);
+    }
+
+    #[test]
+    fn history_item_label_truncates_20() {
+        let long = "a".repeat(25);
+        let (text, enabled) = history_item_label(2, Some(&long));
+        let expected_preview = History::format_preview(&long, 20);
+        assert_eq!(text, format!("2: {}", expected_preview));
+        assert!(enabled);
+        assert!(expected_preview.ends_with("..."));
+    }
+
+    #[test]
+    fn history_item_label_newline_sanitized() {
+        let (text, _) = history_item_label(3, Some("a\nb\nc"));
+        assert_eq!(text, "3: a b c");
     }
 }

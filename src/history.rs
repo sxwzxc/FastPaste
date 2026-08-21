@@ -10,6 +10,7 @@ pub const HISTORY_CAPACITY: usize = 10;
 pub struct History {
     entries: Vec<String>,
     ignore_regex: Option<Regex>,
+    max_bytes: usize,
 }
 
 impl Default for History {
@@ -20,12 +21,17 @@ impl Default for History {
 
 impl History {
     pub fn new(ignore_pattern: Option<String>) -> Self {
+        Self::with_limits(ignore_pattern, MAX_ENTRY_BYTES)
+    }
+
+    pub fn with_limits(ignore_pattern: Option<String>, max_bytes: usize) -> Self {
         let regex = ignore_pattern
             .as_deref()
             .and_then(|p| Regex::new(p).ok());
         Self {
             entries: Vec::with_capacity(HISTORY_CAPACITY),
             ignore_regex: regex,
+            max_bytes: max_bytes.max(1),
         }
     }
 
@@ -33,7 +39,12 @@ impl History {
         Self {
             entries: Vec::with_capacity(HISTORY_CAPACITY),
             ignore_regex: regex,
+            max_bytes: MAX_ENTRY_BYTES,
         }
+    }
+
+    pub fn set_max_bytes(&mut self, max_bytes: usize) {
+        self.max_bytes = max_bytes.max(1);
     }
 
     /// 尝试将文本推入历史
@@ -44,7 +55,7 @@ impl History {
             return false;
         }
         // 超长不入队（由调用方决定是否气泡提示，这里静默忽略）
-        if text.as_bytes().len() > MAX_ENTRY_BYTES {
+        if text.as_bytes().len() > self.max_bytes {
             return false;
         }
         // 敏感内容过滤
@@ -215,5 +226,32 @@ mod tests {
         assert_eq!(p2, "short");
         let p3 = History::format_preview("a\nb\r\nc", 10);
         assert_eq!(p3, "a b  c");
+    }
+
+    #[test]
+    fn default_max_bytes_limits() {
+        let mut h = History::new(None);
+        let large = "a".repeat(MAX_ENTRY_BYTES + 1);
+        assert!(!h.push(large));
+        assert_eq!(h.len(), 0);
+    }
+
+    #[test]
+    fn with_limits_custom() {
+        let mut h = History::with_limits(None, 8);
+        assert!(!h.push("123456789".into()));
+        assert_eq!(h.len(), 0);
+        assert!(h.push("12345678".into()));
+        assert_eq!(h.len(), 1);
+    }
+
+    #[test]
+    fn set_max_bytes_updates() {
+        let mut h = History::new(None);
+        h.set_max_bytes(3);
+        assert!(!h.push("abcd".into()));
+        assert_eq!(h.len(), 0);
+        assert!(h.push("abc".into()));
+        assert_eq!(h.len(), 1);
     }
 }

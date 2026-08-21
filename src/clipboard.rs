@@ -1,8 +1,11 @@
 use anyhow::Result;
+use std::borrow::Cow;
 use std::sync::Arc;
 use parking_lot::Mutex;
 
 use crate::history::History;
+
+// 注意：macOS transient 检测当前未完整实现，仅 Windows 实现了格式名检测，macOS 保持 false
 
 /// 剪贴板访问抽象，便于测试与多平台适配
 pub trait Clipboard: Send {
@@ -11,24 +14,28 @@ pub trait Clipboard: Send {
     /// 获取当前剪贴板内容的完整备份（含非文本类型则返回 None）
     fn get_backup(&mut self) -> Option<ClipboardBackup>;
     fn restore(&mut self, backup: ClipboardBackup) -> Result<()>;
+    /// 是否为敏感内容的瞬态标记（transient），默认 false
+    fn is_transient(&mut self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug, Clone)]
 pub enum ClipboardBackup {
     Text(String),
+    Image { width: usize, height: usize, bytes: Vec<u8> },
     Empty,
 }
 
 /// 基于 arboard 的真实剪贴板实现
 pub struct ArboardClipboard {
     inner: arboard::Clipboard,
-    last_text: Option<String>,
 }
 
 impl ArboardClipboard {
     pub fn new() -> Result<Self> {
         let inner = arboard::Clipboard::new()?;
-        Ok(Self { inner, last_text: None })
+        Ok(Self { inner })
     }
 }
 
@@ -46,15 +53,31 @@ impl Clipboard for ArboardClipboard {
     }
 
     fn get_backup(&mut self) -> Option<ClipboardBackup> {
-        match self.inner.get_text() {
-            Ok(t) => Some(ClipboardBackup::Text(t)),
-            Err(_) => Some(ClipboardBackup::Empty),
+        if let Ok(t) = self.inner.get_text() {
+            return Some(ClipboardBackup::Text(t));
         }
+        if let Ok(img) = self.inner.get_image() {
+            return Some(ClipboardBackup::Image {
+                width: img.width,
+                height: img.height,
+                bytes: img.bytes.into_owned(),
+            });
+        }
+        Some(ClipboardBackup::Empty)
     }
 
     fn restore(&mut self, backup: ClipboardBackup) -> Result<()> {
         match backup {
             ClipboardBackup::Text(t) => self.set_text(&t),
+            ClipboardBackup::Image { width, height, bytes } => {
+                let img = arboard::ImageData {
+                    width,
+                    height,
+                    bytes: Cow::Owned(bytes),
+                };
+                self.inner.set_image(img)?;
+                Ok(())
+            }
             ClipboardBackup::Empty => {
                 // 清空剪贴板：设置空字符串，失败则忽略
                 let _ = self.inner.clear();
@@ -62,18 +85,99 @@ impl Clipboard for ArboardClipboard {
             }
         }
     }
+
+    fn is_transient(&mut self) -> bool {
+        #[cfg(target_os = "windows")]
+        {
+            return is_transient_windows();
+        }
+        #[cfg(target_os = "macos")]
+        {
+            // macOS 检测未完整实现，返回 false
+            // 仅在 debug 下偶尔提示，避免刷屏
+            use std::sync::Once;
+            static ONCE: Once = Once::new();
+            ONCE.call_once(|| {
+                log::debug!("macOS transient 检测未实现");
+            });
+            return false;
+        }
+        #[cfg(not(any(target_os = "windows", target_os = "macos")))]
+        {
+            false
+        }
+    }
+}
+
+#[cfg(target_os = "windows")]
+fn is_transient_windows() -> bool {
+    // 枚举剪贴板格式，检测常见 transient 标记
+    // 仅按格式名是否存在判断，并在注释说明 CanIncludeInClipboardHistory 的 0 值分支简化
+    // 若枚举实现太绕，仅按格式名是否存在即可
+    use clipboard_win::raw::{close, format_name_big, is_format_avail, open, EnumFormats};
+    // 尝试打开剪贴板，失败则认为非 transient
+    if open().is_err() {
+        return false;
+    }
+    let mut is_transient = false;
+    for fmt in EnumFormats::new() {
+        if let Some(name) = format_name_big(fmt) {
+            if name == "ExcludeClipboardContentFromMonitorProcessing"
+                || name == "ClipboardViewerIgnore"
+                || name == "CanIncludeInClipboardHistory"
+            {
+                // 对于 CanIncludeInClipboardHistory，若能读取到该格式数据且为 32-bit 0 也视为 transient
+                // 简化：仅按格式名存在即视为 transient，如需更精确可在后续扩展
+                is_transient = true;
+                break;
+            }
+        } else {
+            // fallback：尝试通过 is_format_avail 检测自定义格式？已覆盖
+        }
+    }
+    let _ = close();
+    // 未能通过枚举拿到时，也尝试直接通过已知名称注册的格式 ID 检测（避免枚举遗漏）
+    if !is_transient {
+        // 将常用名称转换为格式 ID 再检测是否可用，作为兜底
+        if let Some(fmt) = clipboard_win::raw::register_format("ExcludeClipboardContentFromMonitorProcessing") {
+            if is_format_avail(fmt.get() as u32) {
+                is_transient = true;
+            }
+        }
+        if !is_transient {
+            if let Some(fmt) = clipboard_win::raw::register_format("CanIncludeInClipboardHistory") {
+                if is_format_avail(fmt.get() as u32) {
+                    is_transient = true;
+                }
+            }
+        }
+        if !is_transient {
+            if let Some(fmt) = clipboard_win::raw::register_format("ClipboardViewerIgnore") {
+                if is_format_avail(fmt.get() as u32) {
+                    is_transient = true;
+                }
+            }
+        }
+    }
+    is_transient
 }
 
 /// Mock 剪贴板，用于测试
 #[derive(Debug, Default, Clone)]
 pub struct MockClipboard {
     pub text: Option<String>,
+    pub image: Option<(usize, usize, Vec<u8>)>,
+    pub transient: bool,
     pub set_history: Vec<String>,
 }
 
 impl MockClipboard {
     pub fn with_text(t: &str) -> Self {
-        Self { text: Some(t.to_string()), set_history: vec![] }
+        Self { text: Some(t.to_string()), image: None, transient: false, set_history: vec![] }
+    }
+
+    pub fn with_image(width: usize, height: usize, bytes: Vec<u8>) -> Self {
+        Self { text: None, image: Some((width, height, bytes)), transient: false, set_history: vec![] }
     }
 }
 
@@ -83,26 +187,45 @@ impl Clipboard for MockClipboard {
     }
     fn set_text(&mut self, text: &str) -> Result<()> {
         self.text = Some(text.to_string());
+        self.image = None;
         self.set_history.push(text.to_string());
         Ok(())
     }
     fn get_backup(&mut self) -> Option<ClipboardBackup> {
-        Some(match &self.text {
-            Some(t) => ClipboardBackup::Text(t.clone()),
-            None => ClipboardBackup::Empty,
-        })
+        if let Some(t) = &self.text {
+            return Some(ClipboardBackup::Text(t.clone()));
+        }
+        if let Some((w, h, bytes)) = &self.image {
+            return Some(ClipboardBackup::Image {
+                width: *w,
+                height: *h,
+                bytes: bytes.clone(),
+            });
+        }
+        Some(ClipboardBackup::Empty)
     }
     fn restore(&mut self, backup: ClipboardBackup) -> Result<()> {
         match backup {
             ClipboardBackup::Text(t) => {
                 self.text = Some(t);
+                self.image = None;
+                Ok(())
+            }
+            ClipboardBackup::Image { width, height, bytes } => {
+                self.image = Some((width, height, bytes));
+                self.text = None;
                 Ok(())
             }
             ClipboardBackup::Empty => {
                 self.text = None;
+                self.image = None;
                 Ok(())
             }
         }
+    }
+
+    fn is_transient(&mut self) -> bool {
+        self.transient
     }
 }
 
@@ -130,6 +253,12 @@ impl<C: Clipboard> PollingWatcher<C> {
 impl<C: Clipboard + Send> ClipboardWatcher for PollingWatcher<C> {
     fn poll(&mut self) -> Option<String> {
         let current = self.clipboard.get_text()?;
+        if self.clipboard.is_transient() {
+            // 仍更新 last_seen，避免以后反复看到同一瞬态文本，但不向调用方返回
+            // 同一内容稍后作为非瞬态再出现也会被挡住，接受该权衡（密码管理器通常复制后清空）
+            self.last_seen = Some(current.clone());
+            return None;
+        }
         if Some(&current) == self.last_seen.as_ref() {
             return None;
         }
@@ -151,15 +280,15 @@ impl<C: Clipboard + Send + 'static> ClipboardManager<C> {
     }
 
     /// 执行一次轮询检查，返回是否入队
+    /// 停用状态下仍 poll 以更新 last_seen，但不入队，避免再启用时把停用期最后一次复制补录
     pub fn tick(&mut self) -> bool {
-        if !*self.enabled.lock() {
-            return false;
-        }
         let Some(text) = self.watcher.poll() else {
             return false;
         };
-        let mut h = self.history.lock();
-        h.push(text)
+        if !*self.enabled.lock() {
+            return false;
+        }
+        self.history.lock().push(text)
     }
 
     pub fn watcher_mut(&mut self) -> &mut PollingWatcher<C> {
@@ -191,19 +320,27 @@ mod tests {
         let mock = MockClipboard::with_text("hello");
         let watcher = PollingWatcher::new(mock);
         let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled.clone());
+        // 启用，入队 "hello"
         assert!(mgr.tick());
         assert_eq!(history.lock().len(), 1);
+        assert_eq!(history.lock().get(0).unwrap(), "hello");
         // 未变化不入队
         assert!(!mgr.tick());
-        // 停用状态不入队
+        // 停用，把 mock 文本改成 "secret-during-disable"，调用 tick()，返回 false，历史长度仍为 1
         *enabled.lock() = false;
-        mgr.watcher_mut().clipboard_mut().text = Some("world".into());
+        mgr.watcher_mut().clipboard_mut().text = Some("secret-during-disable".into());
         assert!(!mgr.tick());
         assert_eq!(history.lock().len(), 1);
-        // 启用后入队
+        // 再启用，不改 mock 文本，再 tick()：返回 false，历史仍只有 "hello"（不补录）
         *enabled.lock() = true;
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 1);
+        assert_eq!(history.lock().get(0).unwrap(), "hello");
+        // 启用下把文本改成 "after-enable"，tick() 为 true，历史长度为 2
+        mgr.watcher_mut().clipboard_mut().text = Some("after-enable".into());
         assert!(mgr.tick());
         assert_eq!(history.lock().len(), 2);
+        assert_eq!(history.lock().get(0).unwrap(), "after-enable");
     }
 
     #[test]
@@ -219,5 +356,49 @@ mod tests {
         mgr.watcher_mut().clipboard_mut().text = Some("my secret".into());
         assert!(!mgr.tick());
         assert_eq!(history.lock().len(), 0);
+    }
+
+    #[test]
+    fn polling_watcher_transient_blocks() {
+        let mut mock = MockClipboard::with_text("pw");
+        mock.transient = true;
+        let mut watcher = PollingWatcher::new(mock);
+        assert_eq!(watcher.poll(), None);
+        // 相同文本仍 None（已更新 last_seen）
+        assert_eq!(watcher.poll(), None);
+        // 改为非瞬态但相同文本仍被挡
+        watcher.clipboard_mut().transient = false;
+        assert_eq!(watcher.poll(), None);
+        // 新文本且非瞬态则通过
+        watcher.clipboard_mut().text = Some("hello".into());
+        assert_eq!(watcher.poll(), Some("hello".into()));
+    }
+
+    #[test]
+    fn polling_watcher_non_transient_ok() {
+        let mock = MockClipboard::with_text("hello");
+        let mut watcher = PollingWatcher::new(mock);
+        // transient = false 时行为与现在一致
+        assert_eq!(watcher.poll(), Some("hello".into()));
+    }
+
+    #[test]
+    fn manager_transient_not_in_history() {
+        let history = Arc::new(Mutex::new(History::default()));
+        let enabled = Arc::new(Mutex::new(true));
+        let mut mock = MockClipboard::with_text("secret-pw");
+        mock.transient = true;
+        let watcher = PollingWatcher::new(mock);
+        let mut mgr = ClipboardManager::new(watcher, history.clone(), enabled);
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 0);
+        // 之后改为非瞬态但相同文本仍不入队（已更新 last_seen）
+        mgr.watcher_mut().clipboard_mut().transient = false;
+        assert!(!mgr.tick());
+        assert_eq!(history.lock().len(), 0);
+        // 新内容非瞬态则入队
+        mgr.watcher_mut().clipboard_mut().text = Some("normal".into());
+        assert!(mgr.tick());
+        assert_eq!(history.lock().len(), 1);
     }
 }

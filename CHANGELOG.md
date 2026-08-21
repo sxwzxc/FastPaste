@@ -2,6 +2,20 @@
 
 所有显著变更将记录于此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.1] - 2026-08-21
+
+### Added
+- 图标重设计：全新剪贴板 + 闪电简洁图标，适配亮/暗任务栏，高对比度，16px 仍清晰（`assets/icon.ico` 多尺寸、`assets/icon.png`、`assets/preview.png`）
+- `assets/generate_icon.py` 一键生成多尺寸图标（16/20/24/32/48/64/256/512）与 ICO
+- `src/icon_data.rs` 嵌入 32x32 RGBA，`tray.rs:162` 改用新图标，告别纯蓝方块
+
+### Changed
+- `build.rs` 同时嵌入图标与 manifest（`1 ICON` + `1 24`），`debug` 版本号同步至 0.2.1.0
+- `src/main.rs` 新增 `mod icon_data`
+
+### Fixed
+- 托盘图标在亮色任务栏下可见性差、细节丢失
+
 ## [0.2.0] - 2026-08-21
 
 ### Added

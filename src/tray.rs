@@ -160,14 +160,12 @@ pub enum TrayEvent {
 }
 
 fn load_icon() -> Icon {
-    // 1x1 透明像素作为占位，真实应嵌入图标文件
-    // 生成 32x32 蓝色图标
-    let size = 32u32;
-    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
-    for _ in 0..size * size {
-        rgba.extend_from_slice(&[0x2B, 0x7A, 0xFF, 0xFF]);
-    }
+    // 使用嵌入的 FastPaste 图标：白底剪贴板 + 深灰描边 + 顶部黑色夹子 + 灰色文本线 + 右下角蓝色闪电
+    // 设计：高对比度，适配亮/暗任务栏，16px 仍可辨识，详见 assets/generate_icon_v2.py
+    let rgba = crate::icon_data::TRAY_ICON_RGBA.to_vec();
+    let size = crate::icon_data::TRAY_ICON_SIZE;
     Icon::from_rgba(rgba, size, size).unwrap_or_else(|_| {
+        // 回退：1x1 透明
         Icon::from_rgba(vec![0, 0, 0, 0], 1, 1).unwrap()
     })
 }

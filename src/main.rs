@@ -7,6 +7,7 @@ mod config;
 mod dialog;
 mod history;
 mod hotkey;
+mod icon_data;
 mod paste;
 mod single_instance;
 mod tray;

@@ -2,6 +2,13 @@
 
 所有显著变更将记录于此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.3] - 2026-08-21
+
+### Changed
+- 默认粘贴方式改为自动选择：短且无控制字符走击键注入，否则剪贴板粘贴（ADR-0005）
+- Windows 击键注入改为 Unicode SendInput；剪贴板粘贴延迟改为 100/10/300 ms
+- 热键触发只等待数字键松开；发送 Ctrl+V / Enter / Tab 前抬起修饰键且不恢复
+
 ## [0.2.2] - 2026-08-21
 
 ### Fixed

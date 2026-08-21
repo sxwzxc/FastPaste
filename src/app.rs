@@ -131,6 +131,7 @@ pub fn handle_paste(state: &AppState, digit: u8) {
         let cfg = state.config.lock();
         (cfg.paste_method, cfg.preserve_clipboard)
     };
+    let method = crate::paste::resolve_paste_method(method, &text);
 
     if !state.paste_gate.try_begin() {
         log::info!("粘贴进行中，忽略重复热键 digit={}", digit);
@@ -174,7 +175,7 @@ pub fn handle_paste(state: &AppState, digit: u8) {
             Err(e) => {
                 log::error!("粘贴失败: {}", e);
                 let body = if method == crate::config::PasteMethod::Type {
-                    "粘贴失败（逐字击键未成功）"
+                    "粘贴失败（击键注入未成功）"
                 } else {
                     let err_str = format!("{:?}", e);
                     if err_str.contains("clipboard_write_failed") {

@@ -6,6 +6,7 @@ use std::path::{Path, PathBuf};
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum PasteMethod {
+    Auto,
     #[serde(rename = "clipboard")]
     Clipboard,
     #[serde(rename = "type")]
@@ -14,13 +15,14 @@ pub enum PasteMethod {
 
 impl Default for PasteMethod {
     fn default() -> Self {
-        Self::Clipboard
+        Self::Auto
     }
 }
 
 impl std::fmt::Display for PasteMethod {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
+            Self::Auto => write!(f, "auto"),
             Self::Clipboard => write!(f, "clipboard"),
             Self::Type => write!(f, "type"),
         }
@@ -85,7 +87,7 @@ impl Default for Config {
         Self {
             hotkeys: default_hotkeys(),
             preserve_clipboard: true,
-            paste_method: PasteMethod::Clipboard,
+            paste_method: PasteMethod::Auto,
             polling_interval_ms: 500,
             max_entry_bytes: 5 * 1024 * 1024,
             ignore_regex: None,
@@ -177,8 +179,9 @@ impl Config {
         out.push_str(&format!("preserve_clipboard = {}\n", self.preserve_clipboard));
         out.push_str("\n");
         out.push_str("# How to inject into the focused window.\n");
-        out.push_str("# clipboard = copy onto the clipboard then Ctrl+V (Cmd+V on macOS). Default.\n");
-        out.push_str("# type = synthesize keystrokes; does not change the clipboard.\n");
+        out.push_str("# auto = keystroke inject for short text with no control chars; clipboard paste otherwise. Default.\n");
+        out.push_str("# clipboard = copy onto the clipboard then Ctrl+V (Cmd+V on macOS).\n");
+        out.push_str("# type = always keystroke inject, including newlines as Enter (can send in chat apps).\n");
         out.push_str(&format!("paste_method = \"{}\"\n", self.paste_method));
         out.push_str("\n");
         out.push_str("# Clipboard poll interval in milliseconds. Minimum 50.\n");
@@ -413,6 +416,7 @@ mod tests {
         let start = idx.saturating_sub(5);
         let end = (idx + 5).min(lines.len());
         let window = lines[start..end].join("\n");
+        assert!(window.contains("auto"), "window missing auto: {}", window);
         assert!(window.contains("clipboard"), "window missing clipboard: {}", window);
         assert!(window.contains("type"), "window missing type: {}", window);
     }
@@ -426,5 +430,70 @@ mod tests {
         cfg.save_to(&path).unwrap();
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.ignore_regex, Some("a\"b".into()));
+    }
+
+    #[test]
+    fn default_is_auto() {
+        assert_eq!(Config::default().paste_method, PasteMethod::Auto);
+        assert_eq!(PasteMethod::default(), PasteMethod::Auto);
+        assert_eq!(PasteMethod::Auto.to_string(), "auto");
+        assert_eq!(PasteMethod::Clipboard.to_string(), "clipboard");
+        assert_eq!(PasteMethod::Type.to_string(), "type");
+    }
+
+    #[test]
+    fn missing_paste_method_defaults_to_auto() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let content = r#"hotkeys = ["ctrl+shift+1", "ctrl+shift+2", "ctrl+shift+3", "ctrl+shift+4", "ctrl+shift+5", "ctrl+shift+6", "ctrl+shift+7", "ctrl+shift+8", "ctrl+shift+9", "ctrl+shift+0"]
+preserve_clipboard = true
+polling_interval_ms = 500
+max_entry_bytes = 5242880
+autostart_elevated = true
+"#;
+        std::fs::write(&path, content).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert_eq!(loaded.paste_method, PasteMethod::Auto);
+    }
+
+    #[test]
+    fn paste_method_strings_roundtrip() {
+        let cases = [
+            ("auto", PasteMethod::Auto),
+            ("clipboard", PasteMethod::Clipboard),
+            ("type", PasteMethod::Type),
+        ];
+        for (s, expected) in cases {
+            let toml_str = format!("paste_method = \"{}\"", s);
+            let cfg: Config = toml::from_str(&toml_str).unwrap();
+            assert_eq!(cfg.paste_method, expected);
+            assert_eq!(cfg.paste_method.to_string(), s);
+            // also test direct wrapper deser
+            #[derive(Deserialize)]
+            struct Wrapper {
+                paste_method: PasteMethod,
+            }
+            let w: Wrapper = toml::from_str(&toml_str).unwrap();
+            assert_eq!(w.paste_method, expected);
+            // serialize back contains expected string
+            let serialized = toml::to_string(&cfg).unwrap();
+            assert!(serialized.contains(s), "serialized missing {}: {}", s, serialized);
+        }
+    }
+
+    #[test]
+    fn documented_toml_contains_auto_clipboard_type_and_default_note() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let cfg = Config::default();
+        cfg.save_to(&path).unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let lower = content.to_lowercase();
+        assert!(lower.contains("auto"), "missing auto");
+        assert!(lower.contains("clipboard"), "missing clipboard");
+        assert!(lower.contains("type"), "missing type");
+        // check default note and Enter note
+        assert!(content.contains("Default"), "missing Default");
+        assert!(content.contains("Enter"), "missing Enter");
     }
 }

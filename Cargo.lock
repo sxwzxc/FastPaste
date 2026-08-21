@@ -925,7 +925,7 @@ dependencies = [
 
 [[package]]
 name = "fastpaste"
-version = "0.2.2"
+version = "0.2.3"
 dependencies = [
  "anyhow",
  "arboard",
@@ -947,6 +947,7 @@ dependencies = [
  "thiserror 1.0.69",
  "toml 0.8.2",
  "tray-icon",
+ "windows",
  "winit",
 ]
 

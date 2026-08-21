@@ -1,6 +1,6 @@
 [package]
 name = "fastpaste"
-version = "0.2.2"
+version = "0.2.3"
 edition = "2021"
 description = "跨平台静默剪贴板管理器 - 常驻托盘、监听剪贴板、全局热键粘贴最近10条"
 license = "MIT"
@@ -38,6 +38,7 @@ embed-resource = "3"
 
 [target.'cfg(windows)'.dependencies]
 clipboard-win = "5"
+windows = { version = "0.56", features = ["Win32_UI_Input_KeyboardAndMouse"] }
 
 [dev-dependencies]
 tempfile = "3.10"

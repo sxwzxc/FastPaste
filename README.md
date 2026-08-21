@@ -1,7 +1,7 @@
 # FastPaste
 
 <!-- release-info:start -->
-> **当前版本**: `v0.2.2` | **构建时间**: 2026-08-21 16:28:18 | **Commit**: `df972e6`
+> **当前版本**: `v0.2.3` | **构建时间**: 2026-08-21 17:19:32 | **Commit**: `7eea8f8`
 <!-- release-info:end -->
 
 跨平台静默剪贴板管理器，常驻托盘、监听剪贴板、通过全局热键将最近 10 条纯文本条目直接粘贴到焦点窗口。
@@ -10,7 +10,7 @@
 
 - **历史**：容量为 10 的环形队列，按复制时间倒序，`1` 为最新，`0` 为最旧。去重后置顶，空或纯空白不入队，超过 `max_entry_bytes`（默认 5MB）的条目不视为条目。
 - **敏感内容**：被系统标记为瞬态（transient）或匹配 `ignore_regex` 的文本不进入历史。Windows 下检测 `ExcludeClipboardContentFromMonitorProcessing` / `CanIncludeInClipboardHistory` / `ClipboardViewerIgnore` 等格式；macOS 暂未实现则视为非敏感内容。
-- **粘贴**：将指定条目直接注入到当前焦点窗口的输入焦点。默认 `paste_method = clipboard` 采用备份-粘贴-恢复路径，失败时写入剪贴板并在主线程对话框提示用户手动粘贴；可切换 `paste_method = type` 逐字击键。热键触发的粘贴会先等待修饰键松开，再向焦点窗口发送 Ctrl+V（Windows 使用虚拟键 `V`）。热键只在 Pressed 触发，进行中的粘贴会忽略重复热键。
+- **粘贴**：将指定条目直接注入到当前焦点窗口的输入焦点。默认 `paste_method = auto` 自动选择：短且无控制字符（`c < '\u{20}'`，含换行/Tab）且不超过 1000 个 Unicode 标量走击键注入，否则走剪贴板粘贴。`paste_method = clipboard` / `type` 可锁死；`type` 含换行时会发 Enter，聊天软件可能直接发送。Windows 击键注入为 Unicode 按键事件，不经剪贴板。热键触发只等数字键松开（不等待 Ctrl/Shift），Pressed 才触发，进行中的粘贴会忽略重复热键。剪贴板粘贴失败会写入剪贴板并在主线程对话框提示手动粘贴；击键注入失败则提示击键未成功。
 - **保留剪贴板**：开关 `preserve_clipboard`，`true` 时执行备份-粘贴-恢复，支持文本与图片的恢复。
 
 ## 热键
@@ -40,12 +40,14 @@ ctrl+shift+0
 ```toml
 hotkeys = ["ctrl+shift+1", ...]
 preserve_clipboard = true
-paste_method = "clipboard" # 或 "type"
+paste_method = "auto" # auto | clipboard | type
 polling_interval_ms = 500
 max_entry_bytes = 5242880 # 5MB
 ignore_regex = "password|secret"
 autostart_elevated = true
 ```
+
+已有 `config.toml` 若写着 `clipboard`，重载后仍是剪贴板粘贴；改成 `auto` 或删文件重建才用自动选择。`clipboard` 不会自动迁移为 `auto`。
 
 配置文件由英文注释说明每个键与合法取值，修改后通过托盘 **重载配置** 生效。粘贴进行时暂时不把剪贴板变化记入历史，避免把恢复的旧剪贴板当成新复制。
 

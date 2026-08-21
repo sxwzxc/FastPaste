@@ -5,6 +5,7 @@ name: Release
 # 触发:
 #  1) 手动 workflow_dispatch 输入版本号 x.y.z (推荐) -> bump -> 构建双平台 -> 提交推送 -> 发布 Release
 #  2) 推送 tag v*.*.* -> 直接构建双平台 -> 发布 Release (不改版本文件)
+#  3) 推送到 main (自动) -> 构建双平台 -> 自动发布 Release (以 Cargo.toml 版本为准，无需手动打 tag)
 on:
   workflow_dispatch:
     inputs:
@@ -19,8 +20,15 @@ on:
         default: false
         type: boolean
   push:
-    tags:
-      - "v*.*.*"
+    branches: [main]
+    tags: [v*.*.*]
+    paths:
+      - "Cargo.toml"
+      - "Cargo.lock"
+      - "build.rs"
+      - "app.manifest"
+      - "src/**"
+      - ".github/workflows/release.yml"
 
 permissions:
   contents: write

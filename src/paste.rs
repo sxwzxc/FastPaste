@@ -267,7 +267,9 @@ fn send_unicode_windows(text: &str) -> Result<()> {
 }
 
 /// 粘贴器 trait，便于测试
-pub trait Paster: Send {
+/// 注意：macOS 上 Enigo 内部的 CGEventSource 非 Send，因此不在 trait 上约束 Send，
+/// 仅在实际跨线程使用时由调用方保证线程亲和性（本项目中 Paster 仅在粘贴工作线程内创建与使用）。
+pub trait Paster {
     fn paste_text(&mut self, text: &str) -> Result<()>;
     fn paste_with_clipboard(&mut self, text: &str, clipboard: &mut dyn Clipboard, preserve: bool) -> Result<()>;
 }

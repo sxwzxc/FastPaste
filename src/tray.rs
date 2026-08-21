@@ -177,8 +177,8 @@ mod tests {
 
     #[test]
     fn tray_event_parse_history() {
-        let enabled = Arc::new(Mutex::new(true));
-        let history = Arc::new(Mutex::new(History::default()));
+        let _enabled = Arc::new(Mutex::new(true));
+        let _history = Arc::new(Mutex::new(History::default()));
         // 构造 Tray 需要图形环境，测试中仅验证事件解析逻辑
         let id = "history_1";
         assert!(id.starts_with(ID_HISTORY_BASE));

@@ -17,13 +17,14 @@ pub fn is_enabled() -> bool {
     }
 }
 
-pub fn set_enabled(enable: bool, elevated: bool) -> Result<()> {
+pub fn set_enabled(enable: bool, _elevated: bool) -> Result<()> {
     #[cfg(target_os = "windows")]
     {
-        set_enabled_windows(enable, elevated)
+        set_enabled_windows(enable, _elevated)
     }
     #[cfg(target_os = "macos")]
     {
+        let _ = _elevated;
         set_enabled_macos(enable)
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]

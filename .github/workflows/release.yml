@@ -47,6 +47,7 @@ jobs:
       target_version: ${{ steps.version.outputs.target_version }}
       current_version: ${{ steps.version.outputs.current_version }}
       is_bump: ${{ steps.version.outputs.is_bump }}
+      should_publish: ${{ steps.check.outputs.should_publish }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -86,11 +87,27 @@ jobs:
           "target_version=$TargetVersion"  | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
           "is_bump=$IsBump"                 | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
 
+      - name: Check should publish
+        id: check
+        shell: bash
+        run: |
+          set -e
+          TARGET="${{ steps.version.outputs.target_version }}"
+          EVENT="${{ github.event_name }}"
+          REF_TYPE="${{ github.ref_type }}"
+          echo "EVENT=$EVENT REF_TYPE=$REF_TYPE TARGET=$TARGET"
+          # 所有触发均发布：workflow_dispatch/tag 必发；push 到 main 也自动发布（已通过 paths 过滤，仅相关变更触发）
+          # 去重后的 dist/* 单次上传避免重复，此处始终为 true，后续可在 TAG 已存在时按需跳过或覆盖
+          echo "should_publish=true" >> $GITHUB_OUTPUT
+          echo "will publish v$TARGET"
+
   # ------------------------------------------------------------
   # 2) 双平台编译 (Windows + macOS)
+  # 仅当需要发布时才编译，节省资源并避免重复 Release 覆盖
   # ------------------------------------------------------------
   build:
     needs: prepare
+    if: needs.prepare.outputs.should_publish == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -203,7 +220,7 @@ jobs:
   publish:
     needs: [prepare, build]
     runs-on: ubuntu-latest
-    if: always() && needs.build.result == 'success'
+    if: needs.prepare.outputs.should_publish == 'true' && (always() && needs.build.result == 'success')
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -322,13 +339,22 @@ jobs:
           path: dist-all
           merge-multiple: true
 
-      - name: List artifacts
+      - name: Consolidate artifacts (dedup)
         shell: bash
         run: |
+          set -e
+          echo "=== dist-all ==="
           ls -lhR dist-all || true
           mkdir -p dist
+          # 清理旧 dist，避免重复
+          rm -rf dist/*
+          # 合并去重：所有平台产物已在 dist-all 中，直接复制一次
           cp -r dist-all/* dist/ 2>/dev/null || true
+          echo "=== dist (consolidated) ==="
           ls -lh dist/
+          # 去重校验
+          echo "files to upload:"
+          ls -1 dist/
 
       - name: Create GitHub Release (auto)
         uses: softprops/action-gh-release@v2
@@ -337,10 +363,8 @@ jobs:
           name: FastPaste v${{ needs.prepare.outputs.target_version }}
           body_path: CHANGELOG.md
           generate_release_notes: true
+          # 仅从去重后的 dist 上传，避免 dist-all 重复
           files: |
-            dist/fastpaste*
-            dist/*.zip
-            dist/*.sha256
-            dist-all/**
+            dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

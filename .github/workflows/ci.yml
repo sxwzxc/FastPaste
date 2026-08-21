@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+    paths-ignore:
+      - "README.md"
+      - "CHANGELOG.md"
+      - "dist/**"
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    name: test + build (debug)
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [windows-latest, ubuntu-latest]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo test
+        run: cargo test --verbose
+      - name: cargo build (debug)
+        run: cargo build --verbose
+
+  # 可选：每次 push 到 main 自动打包并提交 dist 回仓库
+  # 默认关闭 (if: false)，如需启用改为 if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+  package-and-push:
+    name: package and push dist (optional)
+    if: false
+    needs: check
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: cargo build --release
+        run: cargo build --release --verbose
+      - name: Generate dist
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = "Stop"
+          $src = "target\release\fastpaste.exe"
+          if (-not (Test-Path $src)) { $src = "target\release\fastpaste" }
+          New-Item -ItemType Directory -Path dist -Force | Out-Null
+          Copy-Item $src dist/fastpaste.exe -Force
+          $hash = (Get-FileHash dist/fastpaste.exe -Algorithm SHA256).Hash.ToLower()
+          [System.IO.File]::WriteAllText("dist/fastpaste.exe.sha256", "$hash  fastpaste.exe", (New-Object System.Text.UTF8Encoding $false))
+          Get-ChildItem dist | Format-Table Name, Length -AutoSize | Out-String | Write-Host
+      - name: Commit and push dist
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -f dist/fastpaste.exe dist/fastpaste.exe.sha256
+          git diff --staged --quiet; if ($LASTEXITCODE -eq 0) { Write-Host "无变更"; exit 0 }
+          git commit -m "chore(build): update dist [skip ci]"
+          git push origin HEAD:${{ github.ref_name }}

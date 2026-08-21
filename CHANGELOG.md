@@ -2,6 +2,11 @@
 
 所有显著变更将记录于此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [0.2.4] - 2026-08-21
+
+### Changed
+- 对应槽位无条目时不再弹「历史 N 为空」，改为静默忽略
+
 ## [0.2.3] - 2026-08-21
 
 ### Changed

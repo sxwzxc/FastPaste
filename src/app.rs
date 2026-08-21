@@ -124,7 +124,6 @@ pub fn handle_paste(state: &AppState, digit: u8) {
     }
     let Some(text) = state.get_history_entry(digit) else {
         log::info!("历史为空或索引超出: digit={}", digit);
-        crate::dialog::show_warning("FastPaste", &format!("历史 {} 为空", digit));
         return;
     };
     let (method, preserve) = {
@@ -202,5 +201,21 @@ mod tests {
         assert!(!g.try_begin());
         g.end();
         assert!(g.try_begin());
+    }
+
+    #[test]
+    fn handle_paste_empty_history_is_silent() {
+        let state = AppState::new(Config::default());
+        // 历史为空
+        handle_paste(&state, 1);
+        assert!(
+            state.pending_notice.lock().is_none(),
+            "空槽粘贴不应写 pending_notice"
+        );
+        assert!(
+            state.paste_gate.try_begin(),
+            "空槽粘贴不应占用 PasteGate 单次飞行"
+        );
+        state.paste_gate.end();
     }
 }

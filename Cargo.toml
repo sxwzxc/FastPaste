@@ -1,6 +1,6 @@
 [package]
 name = "fastpaste"
-version = "0.2.3"
+version = "0.2.4"
 edition = "2021"
 description = "跨平台静默剪贴板管理器 - 常驻托盘、监听剪贴板、全局热键粘贴最近10条"
 license = "MIT"

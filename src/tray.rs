@@ -102,6 +102,10 @@ impl Tray {
         self.autostart_item.set_checked(enabled);
     }
 
+    pub fn set_visible(&self, visible: bool) -> anyhow::Result<()> {
+        self._tray.set_visible(visible).map_err(|e| anyhow::anyhow!(e))
+    }
+
     pub fn handle_menu_event(&self, id: &str) -> TrayEvent {
         match id {
             ID_TOGGLE => {

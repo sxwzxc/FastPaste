@@ -1,7 +1,7 @@
 # FastPaste
 
 <!-- release-info:start -->
-> **当前版本**: `v0.2.4` | **构建时间**: 2026-08-21 17:30:13 | **Commit**: `3bec06d`
+> **当前版本**: `v0.2.4` | **构建时间**: 2026-08-22 17:48:02 | **Commit**: `7d18828`
 <!-- release-info:end -->
 
 跨平台静默剪贴板管理器，常驻托盘、监听剪贴板、通过全局热键将最近 10 条纯文本条目直接粘贴到焦点窗口。
@@ -45,7 +45,10 @@ polling_interval_ms = 500
 max_entry_bytes = 5242880 # 5MB
 ignore_regex = "password|secret"
 autostart_elevated = true
+show_tray_icon = true
 ```
+
+`show_tray_icon = false` 时托盘图标隐藏但热键与剪贴板监听仍运行，需手改配置文件改回 `true` 恢复（约 1–2 秒自动生效）。
 
 已有 `config.toml` 若写着 `clipboard`，重载后仍是剪贴板粘贴；改成 `auto` 或删文件重建才用自动选择。`clipboard` 不会自动迁移为 `auto`。
 
@@ -61,7 +64,7 @@ autostart_elevated = true
 - 历史预览：`digit: ` + 前 20 字预览（换行变空格，超长 `...`），有条目可点并触发粘贴，无条目显示 `(空)` 且不可点，约 200ms 刷新
 - 打开配置
 - 重载配置：通过统一重载管线重新读取并校验，更新 `ignore_regex` 与 `max_entry_bytes`；配置文件变更亦会自动重载
-- 自启开关
+- 自启开关（`show_tray_icon` 控制图标显隐，`false` 时需手改文件恢复）
 - 以管理员身份重启（Windows）
 - 权限诊断
 - 关于（显示 `CARGO_PKG_VERSION`）

@@ -68,6 +68,10 @@ fn main() -> Result<()> {
     let event_loop = EventLoop::new().expect("创建 winit EventLoop 失败");
 
     let tray = Arc::new(Tray::new(enabled.clone(), history.clone()).expect("创建托盘失败"));
+    // 启动时按配置决定显隐（tray-icon 0.19 无 with_visible，需 build 后 set_visible；false 时会有短暂闪现，已接受）
+    if !config_arc.lock().show_tray_icon {
+        let _ = tray.set_visible(false);
+    }
 
     let hk_manager_inner = hotkey::HotkeyManager::new().expect("创建热键管理器失败");
     let hk_manager = Arc::new(parking_lot::Mutex::new(hk_manager_inner));
@@ -122,7 +126,13 @@ fn main() -> Result<()> {
                 if already_applied {
                     log::debug!("自动重载请求已过期（内容已被应用），忽略");
                 } else {
-                    run_reload(&app_state, &hk_clone, &enabled_clone, ReloadSource::Auto);
+                    run_reload(
+                        &app_state,
+                        &hk_clone,
+                        &enabled_clone,
+                        &tray_clone,
+                        ReloadSource::Auto,
+                    );
                 }
             }
             // 处理托盘菜单事件
@@ -146,7 +156,13 @@ fn main() -> Result<()> {
                         }
                     }
                     TrayEvent::ReloadConfig => {
-                        run_reload(&app_state, &hk_clone, &enabled_clone, ReloadSource::Manual);
+                        run_reload(
+                            &app_state,
+                            &hk_clone,
+                            &enabled_clone,
+                            &tray_clone,
+                            ReloadSource::Manual,
+                        );
                     }
                     TrayEvent::ToggleAutostart(enable) => {
                         match autostart::set_enabled(enable, true) {
@@ -222,8 +238,10 @@ fn run_reload(
     state: &app::AppState,
     hk: &Arc<parking_lot::Mutex<hotkey::HotkeyManager>>,
     enabled: &Arc<parking_lot::Mutex<bool>>,
+    tray: &Arc<Tray>,
     source: ReloadSource,
 ) {
+    let old_visible = state.config.lock().show_tray_icon;
     match state.reload_config() {
         Ok(new_cfg) => {
             if *enabled.lock() {
@@ -240,6 +258,9 @@ fn run_reload(
                 }
             } else {
                 hk.lock().unregister_all();
+            }
+            if old_visible != new_cfg.show_tray_icon {
+                let _ = tray.set_visible(new_cfg.show_tray_icon);
             }
             // 先结算基线再弹窗：模态框阻塞期间到达的重复事件可被 matches_applied 丢弃
             if let Ok(p) = Config::config_path() {

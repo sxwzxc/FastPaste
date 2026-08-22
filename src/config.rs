@@ -55,6 +55,9 @@ fn default_hotkeys() -> Vec<String> {
 fn default_autostart_elevated() -> bool {
     true
 }
+fn default_show_tray_icon() -> bool {
+    true
+}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Config {
@@ -80,6 +83,9 @@ pub struct Config {
 
     #[serde(default = "default_autostart_elevated")]
     pub autostart_elevated: bool,
+
+    #[serde(default = "default_show_tray_icon")]
+    pub show_tray_icon: bool,
 }
 
 impl Default for Config {
@@ -92,6 +98,7 @@ impl Default for Config {
             max_entry_bytes: 5 * 1024 * 1024,
             ignore_regex: None,
             autostart_elevated: true,
+            show_tray_icon: true,
         }
     }
 }
@@ -218,6 +225,16 @@ impl Config {
             "autostart_elevated = {}\n",
             self.autostart_elevated
         ));
+        out.push_str("\n");
+        out.push_str("# Whether to show the tray icon. When false the icon is hidden\n");
+        out.push_str(
+            "# but hotkeys and clipboard watching keep running. To restore, edit\n",
+        );
+        out.push_str(
+            "# this file and set it to true, or delete the line to use the default.\n",
+        );
+        out.push_str("# An invalid value keeps the previous setting (manual reload shows an error).\n");
+        out.push_str(&format!("show_tray_icon = {}\n", self.show_tray_icon));
         out
     }
 
@@ -374,6 +391,35 @@ mod tests {
         let loaded = Config::load_from(&path).unwrap();
         assert_eq!(loaded.hotkeys, cfg.hotkeys);
         assert_eq!(loaded.preserve_clipboard, cfg.preserve_clipboard);
+    }
+
+    #[test]
+    fn missing_show_tray_icon_defaults_to_true() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let content = r#"hotkeys = ["ctrl+shift+1", "ctrl+shift+2", "ctrl+shift+3", "ctrl+shift+4", "ctrl+shift+5", "ctrl+shift+6", "ctrl+shift+7", "ctrl+shift+8", "ctrl+shift+9", "ctrl+shift+0"]
+preserve_clipboard = true
+polling_interval_ms = 500
+max_entry_bytes = 5242880
+autostart_elevated = true
+"#;
+        std::fs::write(&path, content).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(loaded.show_tray_icon, "缺省 show_tray_icon 应为 true");
+    }
+
+    #[test]
+    fn show_tray_icon_roundtrip_false() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        let mut cfg = Config::default();
+        cfg.show_tray_icon = false;
+        cfg.save_to(&path).unwrap();
+        let loaded = Config::load_from(&path).unwrap();
+        assert!(!loaded.show_tray_icon);
+        // 写出的文件带恢复指引注释与该键本身
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert!(content.contains("show_tray_icon = false"));
     }
 
     #[test]

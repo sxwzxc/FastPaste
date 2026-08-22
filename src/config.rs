@@ -146,7 +146,9 @@ impl Config {
             struct Tmp {
                 hotkeys: Vec<String>,
             }
-            let tmp = Tmp { hotkeys: self.hotkeys.clone() };
+            let tmp = Tmp {
+                hotkeys: self.hotkeys.clone(),
+            };
             toml::to_string(&tmp).unwrap().trim().to_string()
         };
         let ignore_regex_line = match &self.ignore_regex {
@@ -155,7 +157,9 @@ impl Config {
                 struct Tmp {
                     ignore_regex: String,
                 }
-                let tmp = Tmp { ignore_regex: val.clone() };
+                let tmp = Tmp {
+                    ignore_regex: val.clone(),
+                };
                 let s = toml::to_string(&tmp).unwrap();
                 // s is 'ignore_regex = "..."\n'
                 s.trim().to_string()
@@ -164,7 +168,9 @@ impl Config {
         };
         let mut out = String::new();
         out.push_str("# FastPaste configuration\n");
-        out.push_str("# Edit this file, then use Reload configuration on the tray.\n");
+        out.push_str(
+            "# Edit this file; changes are applied automatically once the file settles.\n",
+        );
         out.push_str("# Invalid values are rejected and the previous configuration is kept.\n");
         out.push_str("\n");
         out.push_str("# Ten hotkeys, in order. Index 0 = newest history item; index 9 = oldest.\n");
@@ -174,9 +180,14 @@ impl Config {
         out.push_str(&hotkeys_line);
         out.push_str("\n");
         out.push_str("\n");
-        out.push_str("# If true, a clipboard paste restores the previous clipboard after injecting.\n");
+        out.push_str(
+            "# If true, a clipboard paste restores the previous clipboard after injecting.\n",
+        );
         out.push_str("# If false, the pasted entry is left on the clipboard.\n");
-        out.push_str(&format!("preserve_clipboard = {}\n", self.preserve_clipboard));
+        out.push_str(&format!(
+            "preserve_clipboard = {}\n",
+            self.preserve_clipboard
+        ));
         out.push_str("\n");
         out.push_str("# How to inject into the focused window.\n");
         out.push_str("# auto = keystroke inject for short text with no control chars; clipboard paste otherwise. Default.\n");
@@ -185,18 +196,28 @@ impl Config {
         out.push_str(&format!("paste_method = \"{}\"\n", self.paste_method));
         out.push_str("\n");
         out.push_str("# Clipboard poll interval in milliseconds. Minimum 50.\n");
-        out.push_str(&format!("polling_interval_ms = {}\n", self.polling_interval_ms));
+        out.push_str(&format!(
+            "polling_interval_ms = {}\n",
+            self.polling_interval_ms
+        ));
         out.push_str("\n");
-        out.push_str("# Max bytes for one history entry. Inclusive range 1 ..= 52428800 (50 MiB).\n");
+        out.push_str(
+            "# Max bytes for one history entry. Inclusive range 1 ..= 52428800 (50 MiB).\n",
+        );
         out.push_str(&format!("max_entry_bytes = {}\n", self.max_entry_bytes));
         out.push_str("\n");
         out.push_str("# Optional regex; matching text is not stored. Uncomment to enable:\n");
         out.push_str(&ignore_regex_line);
         out.push_str("\n");
         out.push_str("\n");
-        out.push_str("# Windows: when enabling autostart, request a highest-privilege logon task.\n");
+        out.push_str(
+            "# Windows: when enabling autostart, request a highest-privilege logon task.\n",
+        );
         out.push_str("# true = HIGHEST. false is ignored by the tray today (always HIGHEST); kept for the file format.\n");
-        out.push_str(&format!("autostart_elevated = {}\n", self.autostart_elevated));
+        out.push_str(&format!(
+            "autostart_elevated = {}\n",
+            self.autostart_elevated
+        ));
         out
     }
 
@@ -224,14 +245,20 @@ impl Config {
 /// 返回 (modifiers, key)
 pub fn parse_hotkey(s: &str) -> Result<(String, String)> {
     let lower = s.to_lowercase();
-    let parts: Vec<&str> = lower.split('+').map(|p| p.trim()).filter(|p| !p.is_empty()).collect();
+    let parts: Vec<&str> = lower
+        .split('+')
+        .map(|p| p.trim())
+        .filter(|p| !p.is_empty())
+        .collect();
     if parts.len() < 2 {
         anyhow::bail!("热键至少包含一个修饰键和一个主键，如 ctrl+shift+1");
     }
     let (mods, key) = parts.split_at(parts.len() - 1);
     let key = key[0].to_string();
     // 校验修饰键
-    let valid_mods = ["ctrl", "shift", "alt", "super", "cmd", "command", "win", "meta"];
+    let valid_mods = [
+        "ctrl", "shift", "alt", "super", "cmd", "command", "win", "meta",
+    ];
     for m in mods {
         if !valid_mods.contains(m) {
             anyhow::bail!("未知修饰键: {}", m);
@@ -288,7 +315,8 @@ pub fn to_global_hotkey(s: &str) -> Result<global_hotkey::hotkey::HotKey> {
             let ch = c.chars().next().unwrap();
             if ch.is_ascii_alphabetic() {
                 let code_str = format!("Key{}", ch.to_ascii_uppercase());
-                Code::from_str(&code_str).map_err(|_| anyhow::anyhow!("无法解析主键: {}", key_str))?
+                Code::from_str(&code_str)
+                    .map_err(|_| anyhow::anyhow!("无法解析主键: {}", key_str))?
             } else {
                 Code::from_str(&key_str.to_uppercase())
                     .or_else(|_| Code::from_str(key_str))
@@ -412,12 +440,19 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert!(content.contains("FastPaste configuration"));
         let lines: Vec<&str> = content.lines().collect();
-        let idx = lines.iter().position(|l| l.contains("paste_method")).expect("paste_method not found");
+        let idx = lines
+            .iter()
+            .position(|l| l.contains("paste_method"))
+            .expect("paste_method not found");
         let start = idx.saturating_sub(5);
         let end = (idx + 5).min(lines.len());
         let window = lines[start..end].join("\n");
         assert!(window.contains("auto"), "window missing auto: {}", window);
-        assert!(window.contains("clipboard"), "window missing clipboard: {}", window);
+        assert!(
+            window.contains("clipboard"),
+            "window missing clipboard: {}",
+            window
+        );
         assert!(window.contains("type"), "window missing type: {}", window);
     }
 
@@ -477,7 +512,12 @@ autostart_elevated = true
             assert_eq!(w.paste_method, expected);
             // serialize back contains expected string
             let serialized = toml::to_string(&cfg).unwrap();
-            assert!(serialized.contains(s), "serialized missing {}: {}", s, serialized);
+            assert!(
+                serialized.contains(s),
+                "serialized missing {}: {}",
+                s,
+                serialized
+            );
         }
     }
 

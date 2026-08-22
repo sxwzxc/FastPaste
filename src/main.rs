@@ -4,6 +4,7 @@ mod app;
 mod autostart;
 mod clipboard;
 mod config;
+mod config_watch;
 mod dialog;
 mod history;
 mod hotkey;
@@ -15,6 +16,7 @@ mod tray;
 use anyhow::Result;
 use global_hotkey::GlobalHotKeyEvent;
 use muda::MenuEvent;
+use std::sync::atomic::Ordering;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use winit::event::Event;
@@ -45,9 +47,7 @@ fn main() -> Result<()> {
         }
     }
 
-    let first_run = Config::config_path()
-        .map(|p| !p.exists())
-        .unwrap_or(false);
+    let first_run = Config::config_path().map(|p| !p.exists()).unwrap_or(false);
 
     let config = match Config::load() {
         Ok(c) => c,
@@ -76,8 +76,15 @@ fn main() -> Result<()> {
         let cfg = config_arc.lock().clone();
         let failures = hk.register_from_config(&cfg);
         if !failures.is_empty() {
-            let msg = failures.iter().map(|(d, s)| format!("{}: {}", d, s)).collect::<Vec<_>>().join("\n");
-            dialog::show_warning("FastPaste 热键冲突", &format!("以下热键注册失败，将跳过：\n{}", msg));
+            let msg = failures
+                .iter()
+                .map(|(d, s)| format!("{}: {}", d, s))
+                .collect::<Vec<_>>()
+                .join("\n");
+            dialog::show_warning(
+                "FastPaste 热键冲突",
+                &format!("以下热键注册失败，将跳过：\n{}", msg),
+            );
         }
     }
 
@@ -106,6 +113,18 @@ fn main() -> Result<()> {
             if let Some((title, body)) = pending_notice_clone.lock().take() {
                 dialog::show_warning(&title, &body);
             }
+            // 自动重载：轮询线程探测到稳定变更后置位，这里统一走重载管线（ADR-0005）
+            if app_state.auto_reload_pending.swap(false, Ordering::SeqCst) {
+                let already_applied = Config::config_path()
+                    .ok()
+                    .map(|p| app_state.config_probe.lock().matches_applied(&p))
+                    .unwrap_or(true);
+                if already_applied {
+                    log::debug!("自动重载请求已过期（内容已被应用），忽略");
+                } else {
+                    run_reload(&app_state, &hk_clone, &enabled_clone, ReloadSource::Auto);
+                }
+            }
             // 处理托盘菜单事件
             while let Ok(menu_event) = MenuEvent::receiver().try_recv() {
                 let tray_event = tray_clone.handle_menu_event(&menu_event.id.0);
@@ -127,26 +146,7 @@ fn main() -> Result<()> {
                         }
                     }
                     TrayEvent::ReloadConfig => {
-                        let reload_state = app_state.clone();
-                        match reload_state.reload_config() {
-                            Ok(new_cfg) => {
-                                if *enabled_clone.lock() {
-                                    let mut hk = hk_clone.lock();
-                                    hk.unregister_all();
-                                    let fails = hk.register_from_config(&new_cfg);
-                                    if !fails.is_empty() {
-                                        let msg = fails.iter().map(|(d,s)| format!("{}: {}", d, s)).collect::<Vec<_>>().join("\n");
-                                        dialog::show_warning("热键冲突", &msg);
-                                    }
-                                } else {
-                                    hk_clone.lock().unregister_all();
-                                }
-                                dialog::show_info("FastPaste", "配置已重载");
-                            }
-                            Err(e) => {
-                                dialog::show_error("重载配置失败", &e.to_string());
-                            }
-                        }
+                        run_reload(&app_state, &hk_clone, &enabled_clone, ReloadSource::Manual);
                     }
                     TrayEvent::ToggleAutostart(enable) => {
                         match autostart::set_enabled(enable, true) {
@@ -207,6 +207,59 @@ fn main() -> Result<()> {
     Ok(())
 }
 
+/// 重载来源：决定失败时的反馈通道（ADR-0005）
+enum ReloadSource {
+    /// 托盘菜单触发：成败均弹系统对话框
+    Manual,
+    /// 文件变更自动触发：失败静默保留旧配置，仅记日志
+    Auto,
+}
+
+/// 手动与自动共用的重载管线：读取→校验→整体应用→热键重注册。
+/// 成功时两者都弹“配置已重载”；热键冲突沿用警告对话框；
+/// 唯一差异在加载/校验失败的反馈通道。
+fn run_reload(
+    state: &app::AppState,
+    hk: &Arc<parking_lot::Mutex<hotkey::HotkeyManager>>,
+    enabled: &Arc<parking_lot::Mutex<bool>>,
+    source: ReloadSource,
+) {
+    match state.reload_config() {
+        Ok(new_cfg) => {
+            if *enabled.lock() {
+                let mut hkm = hk.lock();
+                hkm.unregister_all();
+                let fails = hkm.register_from_config(&new_cfg);
+                if !fails.is_empty() {
+                    let msg = fails
+                        .iter()
+                        .map(|(d, s)| format!("{}: {}", d, s))
+                        .collect::<Vec<_>>()
+                        .join("\n");
+                    dialog::show_warning("热键冲突", &msg);
+                }
+            } else {
+                hk.lock().unregister_all();
+            }
+            // 先结算基线再弹窗：模态框阻塞期间到达的重复事件可被 matches_applied 丢弃
+            if let Ok(p) = Config::config_path() {
+                state.config_probe.lock().mark_settled(&p);
+            }
+            dialog::show_info("FastPaste", "配置已重载");
+        }
+        Err(e) => match source {
+            ReloadSource::Manual => dialog::show_error("重载配置失败", &e.to_string()),
+            ReloadSource::Auto => {
+                log::warn!("自动重载失败，保留旧配置: {}", e);
+                // 结算该内容，避免对同一份坏配置反复尝试
+                if let Ok(p) = Config::config_path() {
+                    state.config_probe.lock().mark_settled(&p);
+                }
+            }
+        },
+    }
+}
+
 fn open_config_file(path: &std::path::Path) -> Result<()> {
     if !path.exists() {
         let cfg = Config::default();
@@ -214,21 +267,15 @@ fn open_config_file(path: &std::path::Path) -> Result<()> {
     }
     #[cfg(target_os = "windows")]
     {
-        std::process::Command::new("notepad")
-            .arg(path)
-            .spawn()?;
+        std::process::Command::new("notepad").arg(path).spawn()?;
     }
     #[cfg(target_os = "macos")]
     {
-        std::process::Command::new("open")
-            .arg(path)
-            .spawn()?;
+        std::process::Command::new("open").arg(path).spawn()?;
     }
     #[cfg(not(any(target_os = "windows", target_os = "macos")))]
     {
-        std::process::Command::new("xdg-open")
-            .arg(path)
-            .spawn()?;
+        std::process::Command::new("xdg-open").arg(path).spawn()?;
     }
     Ok(())
 }
@@ -312,4 +359,3 @@ fn show_diagnosis() {
         dialog::show_info("权限诊断", "当前平台诊断暂未实现");
     }
 }
-

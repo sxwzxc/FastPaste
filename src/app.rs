@@ -9,6 +9,7 @@ use crate::clipboard::{INGEST_CATCHUP, INGEST_LIVE, INGEST_PAUSED};
 
 use crate::clipboard::{ArboardClipboard, Clipboard, ClipboardManager, PollingWatcher};
 use crate::config::Config;
+use crate::config_watch::ConfigProbe;
 use crate::history::History;
 use crate::paste::{do_paste, EnigoPaster};
 
@@ -18,7 +19,9 @@ pub struct PasteGate {
 
 impl PasteGate {
     pub fn new() -> Self {
-        Self { busy: AtomicBool::new(false) }
+        Self {
+            busy: AtomicBool::new(false),
+        }
     }
     pub fn try_begin(&self) -> bool {
         self.busy
@@ -38,6 +41,10 @@ pub struct AppState {
     pub pending_notice: Arc<Mutex<Option<(String, String)>>>,
     pub paste_gate: Arc<PasteGate>,
     pub ingest_paused: Arc<AtomicU8>,
+    /// 配置变更探测器（ADR-0005），轮询线程写、主线程结算
+    pub config_probe: Arc<Mutex<ConfigProbe>>,
+    /// 轮询线程置位、主线程消费的自动重载请求
+    pub auto_reload_pending: Arc<AtomicBool>,
 }
 
 impl AppState {
@@ -52,7 +59,18 @@ impl AppState {
         let pending_notice = Arc::new(Mutex::new(None));
         let paste_gate = Arc::new(PasteGate::new());
         let ingest_paused = Arc::new(AtomicU8::new(INGEST_LIVE));
-        Self { history, enabled, config, pending_notice, paste_gate, ingest_paused }
+        let config_probe = Arc::new(Mutex::new(ConfigProbe::new()));
+        let auto_reload_pending = Arc::new(AtomicBool::new(false));
+        Self {
+            history,
+            enabled,
+            config,
+            pending_notice,
+            paste_gate,
+            ingest_paused,
+            config_probe,
+            auto_reload_pending,
+        }
     }
 
     pub fn push_history(&self, text: String) -> bool {
@@ -74,7 +92,13 @@ impl AppState {
     }
 
     pub fn reload_config(&self) -> Result<Config> {
-        let new_cfg = Config::load()?;
+        let path = Config::config_path()?;
+        self.reload_config_from(&path)
+    }
+
+    /// 从指定路径重载：读取→校验→整体应用；任一环节失败则保留旧配置不应用。
+    pub fn reload_config_from(&self, path: &std::path::Path) -> Result<Config> {
+        let new_cfg = Config::load_from(path)?;
         new_cfg.validate()?;
         {
             let mut h = self.history.lock();
@@ -86,12 +110,14 @@ impl AppState {
     }
 }
 
-/// 启动剪贴板轮询线程
+/// 启动剪贴板轮询线程（同时驱动配置变更探测，见 ADR-0005）
 pub fn spawn_clipboard_thread(state: AppState) {
     let history = state.history.clone();
     let enabled = state.enabled.clone();
     let config = state.config.clone();
     let ingest_paused = state.ingest_paused.clone();
+    let config_probe = state.config_probe.clone();
+    let auto_reload_pending = state.auto_reload_pending.clone();
 
     thread::spawn(move || {
         let clipboard = match ArboardClipboard::new() {
@@ -103,6 +129,7 @@ pub fn spawn_clipboard_thread(state: AppState) {
         };
         let watcher = PollingWatcher::new(clipboard);
         let mut manager = ClipboardManager::new(watcher, history, enabled, ingest_paused);
+        let config_path = Config::config_path().ok();
         loop {
             let interval = {
                 let cfg = config.lock();
@@ -111,6 +138,13 @@ pub fn spawn_clipboard_thread(state: AppState) {
             thread::sleep(Duration::from_millis(interval));
             if manager.tick() {
                 log::debug!("新条目已入队");
+            }
+            if let Some(path) = &config_path {
+                if config_probe.lock().probe(path)
+                    && !auto_reload_pending.swap(true, Ordering::SeqCst)
+                {
+                    log::info!("检测到配置文件稳定变更，请求自动重载");
+                }
             }
         }
     });
@@ -154,15 +188,15 @@ pub fn handle_paste(state: &AppState, digit: u8) {
             gate: state_clone.paste_gate.clone(),
             ingest: state_clone.ingest_paused.clone(),
         };
-        state_clone.ingest_paused.store(INGEST_PAUSED, Ordering::SeqCst);
+        state_clone
+            .ingest_paused
+            .store(INGEST_PAUSED, Ordering::SeqCst);
         let mut clipboard = match ArboardClipboard::new() {
             Ok(cb) => cb,
             Err(e) => {
                 log::error!("剪贴板初始化失败: {}", e);
-                *state_clone.pending_notice.lock() = Some((
-                    "FastPaste".into(),
-                    "粘贴失败，无法访问剪贴板".into(),
-                ));
+                *state_clone.pending_notice.lock() =
+                    Some(("FastPaste".into(), "粘贴失败，无法访问剪贴板".into()));
                 return;
             }
         };
@@ -183,8 +217,7 @@ pub fn handle_paste(state: &AppState, digit: u8) {
                         "粘贴失败，已写入剪贴板，请手动粘贴"
                     }
                 };
-                *state_clone.pending_notice.lock() =
-                    Some(("FastPaste".into(), body.into()));
+                *state_clone.pending_notice.lock() = Some(("FastPaste".into(), body.into()));
             }
         }
     });
@@ -193,6 +226,8 @@ pub fn handle_paste(state: &AppState, digit: u8) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
+    use tempfile::tempdir;
 
     #[test]
     fn paste_gate_single_flight() {
@@ -217,5 +252,48 @@ mod tests {
             "空槽粘贴不应占用 PasteGate 单次飞行"
         );
         state.paste_gate.end();
+    }
+
+    #[test]
+    fn reload_config_applies_valid_file() {
+        let state = AppState::new(Config::default());
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "polling_interval_ms = 300\nmax_entry_bytes = 1024").unwrap();
+
+        let cfg = state.reload_config_from(&path).expect("合法配置应重载成功");
+        assert_eq!(cfg.polling_interval_ms, 300);
+        assert_eq!(state.config.lock().polling_interval_ms, 300);
+        assert_eq!(state.config.lock().max_entry_bytes, 1024);
+    }
+
+    #[test]
+    fn reload_config_failure_keeps_old_state() {
+        let state = AppState::new(Config::default());
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("config.toml");
+        fs::write(&path, "polling_interval_ms = not_a_number").unwrap();
+
+        assert!(
+            state.reload_config_from(&path).is_err(),
+            "坏 TOML 应重载失败"
+        );
+        assert_eq!(
+            state.config.lock().polling_interval_ms,
+            500,
+            "旧配置必须保留"
+        );
+        assert_eq!(state.config.lock().max_entry_bytes, 5 * 1024 * 1024);
+
+        // 校验失败同样不应用：合法 TOML 但数值越界
+        fs::write(&path, "polling_interval_ms = 10").unwrap();
+        assert!(state.reload_config_from(&path).is_err());
+        assert_eq!(state.config.lock().polling_interval_ms, 500);
+
+        // 修复后可正常应用
+        fs::write(&path, "polling_interval_ms = 120\nmax_entry_bytes = 2048").unwrap();
+        state.reload_config_from(&path).expect("修复后应成功");
+        assert_eq!(state.config.lock().polling_interval_ms, 120);
+        assert_eq!(state.config.lock().max_entry_bytes, 2048);
     }
 }

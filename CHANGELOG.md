@@ -2,6 +2,11 @@
 
 所有显著变更将记录于此文件。格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.0.0/)，版本号遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Added
+- 配置自动重载：保存 `config.toml` 后约 1–2 秒自动应用并弹窗确认；连续两次内容哈希一致才加载以消化编辑中间态，校验失败静默保留旧配置（见日志），删除文件自动重建默认配置。手动重载入口与行为不变（ADR-0005）
+
 ## [0.2.4] - 2026-08-21
 
 ### Changed
